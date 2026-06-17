@@ -139,14 +139,37 @@ tags:
 
 ```bash
 npm install
-npm run dev       # Build (watch mode)
-npm run build     # Build (production)
-npm run package   # Package for release
+npm run dev        # Build (watch mode)
+npm run build      # Build (production)
+npm run lint       # ESLint
+npm run typecheck  # tsc --noEmit
+npm test           # Run unit tests (Vitest) once
+npm run test:watch # Run unit tests in watch mode
+npm run package    # Build + copy main.js/manifest.json/versions.json into release/
 ```
+
+### Testing in a real vault
+
+Unit tests cover the parser and template logic, but to exercise the plugin inside Obsidian:
+
+1. Copy `.env.example` to `.env` and set `OBSIDIAN_PLUGINS` to the `plugins` folder of the vault you want to test against, e.g.:
+   ```
+   OBSIDIAN_PLUGINS="$HOME/path/to/YourVault/.obsidian/plugins"
+   ```
+2. Run `npm run deploy-local`. This builds the plugin and copies it into `$OBSIDIAN_PLUGINS/granola-meetings-simple-sync/`, preserving any existing `data.json` (your settings/auth) so you don't have to reconnect each time.
+3. In Obsidian, reload (or toggle the plugin off/on) to pick up the new build.
 
 ### Releasing
 
-Per [Obsidian's guidelines](https://github.com/obsidianmd/obsidian-sample-plugin), tags should **not** use a `v` prefix (use `1.0.0`, not `v1.0.0`).
+Releases are automated by `.github/workflows/release.yml`: pushing a tag of the form `X.Y.Z` builds the plugin and creates a GitHub release with `main.js` and `manifest.json` attached. BRAT and manual installs pull from that release.
+
+To cut a release:
+
+1. Bump the version: `npm version patch` (or `minor`/`major`). This runs `version-bump.mjs`, which updates `manifest.json` and `versions.json`, and stages them in the version commit.
+2. Push the commit and the tag: `git push && git push --tags`.
+3. The Release workflow runs on the tag and publishes the GitHub release.
+
+Per [Obsidian's guidelines](https://github.com/obsidianmd/obsidian-sample-plugin), tags must **not** use a `v` prefix (use `1.0.0`, not `v1.0.0`) — `npm version` already creates tags without the prefix here, and the workflow only triggers on `[0-9]+.[0-9]+.[0-9]+` tags.
 
 ## License
 
