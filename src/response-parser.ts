@@ -31,6 +31,18 @@ export interface MeetingData {
 }
 
 /**
+ * Granola serializes its checkbox/task nodes to Markdown without the leading
+ * list dash, producing lines like "[ ] Task" or "  [x] Done". Obsidian only
+ * renders interactive checkboxes when the dash is present ("- [ ] Task"), so
+ * we re-add it while preserving indentation. Lines that already have a list
+ * marker (-, *, +) before the checkbox are left untouched.
+ */
+export function normalizeTaskItems(markdown: string): string {
+	if (!markdown) return markdown;
+	return markdown.replace(/^([ \t]*)(\[[ xX]\]\s)/gm, "$1- $2");
+}
+
+/**
  * Parse the XML-ish list_meetings / get_meetings response into meeting objects.
  * When called on get_meetings response, also extracts private_notes and summary.
  */
@@ -46,10 +58,10 @@ export function parseMeetingsResponse(xml: string): ParsedMeetingDetails[] {
 		const participants = participantsMatch ? parseParticipants(participantsMatch[1].trim()) : [];
 
 		const notesMatch = body.match(/<private_notes>\s*([\s\S]*?)\s*<\/private_notes>/);
-		const privateNotes = notesMatch ? notesMatch[1].trim() : "";
+		const privateNotes = notesMatch ? normalizeTaskItems(notesMatch[1].trim()) : "";
 
 		const summaryMatch = body.match(/<summary>\s*([\s\S]*?)\s*<\/summary>/);
-		const summary = summaryMatch ? summaryMatch[1].trim() : "";
+		const summary = summaryMatch ? normalizeTaskItems(summaryMatch[1].trim()) : "";
 
 		meetings.push({ id, title, date, participants, privateNotes, summary });
 	}

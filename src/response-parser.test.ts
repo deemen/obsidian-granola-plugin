@@ -7,6 +7,7 @@ import {
 	formatTranscriptText,
 	parseGranolaDate,
 	buildMeetingData,
+	normalizeTaskItems,
 } from "./response-parser";
 
 describe("parseParticipants", () => {
@@ -77,6 +78,39 @@ describe("parseMeetingsResponse", () => {
 		expect(result[0].summary).toBe("");
 		expect(result[0].participants).toEqual([]);
 		expect(result[1].summary).toBe("Done");
+	});
+});
+
+describe("normalizeTaskItems", () => {
+	it("adds the leading dash to unchecked and checked task lines", () => {
+		expect(normalizeTaskItems("[ ] Active task")).toBe("- [ ] Active task");
+		expect(normalizeTaskItems("[x] Done task")).toBe("- [x] Done task");
+		expect(normalizeTaskItems("[X] Done task")).toBe("- [X] Done task");
+	});
+
+	it("preserves indentation of nested tasks", () => {
+		expect(normalizeTaskItems("    [ ] Nested")).toBe("    - [ ] Nested");
+		expect(normalizeTaskItems("\t[ ] Tabbed")).toBe("\t- [ ] Tabbed");
+	});
+
+	it("leaves already-valid task lines untouched", () => {
+		expect(normalizeTaskItems("- [ ] Already good")).toBe("- [ ] Already good");
+		expect(normalizeTaskItems("* [x] Star marker")).toBe("* [x] Star marker");
+	});
+
+	it("does not touch non-task lines or inline brackets", () => {
+		expect(normalizeTaskItems("Just a sentence [ ] mid-line")).toBe("Just a sentence [ ] mid-line");
+		expect(normalizeTaskItems("## Heading")).toBe("## Heading");
+	});
+
+	it("normalizes within a multi-line block", () => {
+		const input = "## Tasks\n[ ] First\n[x] Second\nplain text";
+		const expected = "## Tasks\n- [ ] First\n- [x] Second\nplain text";
+		expect(normalizeTaskItems(input)).toBe(expected);
+	});
+
+	it("returns empty input unchanged", () => {
+		expect(normalizeTaskItems("")).toBe("");
 	});
 });
 
