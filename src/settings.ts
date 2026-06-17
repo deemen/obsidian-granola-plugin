@@ -91,9 +91,15 @@ export class GranolaSyncSettingTab extends PluginSettingTab {
 					.addButton((button) =>
 						button
 							.setButtonText("Disconnect")
+							// setDestructive() is the modern replacement but is only available in
+							// Obsidian 1.13.0+; we keep setWarning() to support minAppVersion 1.4.0.
+							// eslint-disable-next-line @typescript-eslint/no-deprecated
 							.setWarning()
 							.onClick(async () => {
 								await this.plugin.disconnectAccount(account.id);
+								// Declarative getSettingDefinitions() is 1.13.0+; re-rendering via
+								// display() is the supported approach for older Obsidian versions.
+								// eslint-disable-next-line @typescript-eslint/no-deprecated
 								this.display();
 							})
 					);
