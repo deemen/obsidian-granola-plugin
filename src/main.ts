@@ -16,7 +16,7 @@ import {
 	buildMeetingData,
 	excludeSelf,
 } from "./response-parser";
-import { loadTemplate, applyTemplate, generateFilename } from "./template";
+import { loadTemplate, applyTemplate, generateFilename, getFolderBasePath, resolveDatePattern } from "./template";
 
 export interface GranolaAccount {
 	id: string;
@@ -357,16 +357,14 @@ export default class GranolaSyncPlugin extends Plugin {
 		}
 
 		// Ensure folder exists
-		const folderPath = normalizePath(folderPathSetting);
-		const folder = this.app.vault.getAbstractFileByPath(folderPath);
-		if (!folder) {
-			try {
-				await this.app.vault.createFolder(folderPath);
-			} catch (error) {
-				const message = error instanceof Error ? error.message : "Unknown error";
-				new Notice(`Error creating folder: ${message}`);
-				return;
-			}
+		const folderPathPattern = normalizePath(folderPathSetting);
+		const folderBasePath = normalizePath(getFolderBasePath(folderPathPattern) || DEFAULT_SETTINGS.folderPath);
+		try {
+			await this.ensureFolderExists(folderBasePath);
+		} catch (error) {
+			const message = error instanceof Error ? error.message : "Unknown error";
+			new Notice(`Error creating folder: ${message}`);
+			return;
 		}
 
 		// Build map of existing granola_id -> file (shared across all accounts).
@@ -375,7 +373,7 @@ export default class GranolaSyncPlugin extends Plugin {
 		// first, so its copy wins if the same meeting exists in two places.
 		const existingDocs = new Map<string, TFile>();
 		const files = this.app.vault.getMarkdownFiles();
-		for (const file of syncFolderFirst(files, folderPath)) {
+		for (const file of syncFolderFirst(files, folderBasePath)) {
 			const fileCache = this.app.metadataCache.getFileCache(file);
 			const granolaId = fileCache?.frontmatter?.granola_id as string | undefined;
 			if (granolaId && !existingDocs.has(granolaId)) {
@@ -403,7 +401,7 @@ export default class GranolaSyncPlugin extends Plugin {
 
 		const ctx: SyncContext = {
 			template,
-			folderPath,
+			folderPathPattern,
 			filenamePattern,
 			existingDocs,
 			emailToNoteTitle,
@@ -438,6 +436,19 @@ export default class GranolaSyncPlugin extends Plugin {
 				message += `. ${failedAccounts} account${failedAccounts !== 1 ? "s" : ""} failed — check console.`;
 			}
 			new Notice(message);
+		}
+	}
+
+	private async ensureFolderExists(folderPath: string): Promise<void> {
+		const normalizedPath = normalizePath(folderPath);
+		const parts = normalizedPath.split("/").filter(Boolean);
+		let currentPath = "";
+
+		for (const part of parts) {
+			currentPath = currentPath ? `${currentPath}/${part}` : part;
+			if (!this.app.vault.getAbstractFileByPath(currentPath)) {
+				await this.app.vault.createFolder(currentPath);
+			}
 		}
 	}
 
@@ -548,8 +559,14 @@ export default class GranolaSyncPlugin extends Plugin {
 					await this.app.vault.modify(existingFile, content);
 					updated++;
 				} else {
+					const folderPath = normalizePath(resolveDatePattern(ctx.folderPathPattern, meetingData.date));
+					await this.ensureFolderExists(folderPath);
 					const filename = generateFilename(ctx.filenamePattern, meetingData);
-					const filePath = normalizePath(`${ctx.folderPath}/${filename}.md`);
+					const filePath = normalizePath(`${folderPath}/${filename}.md`);
+					const lastSlash = filePath.lastIndexOf("/");
+					if (lastSlash > 0) {
+						await this.ensureFolderExists(filePath.substring(0, lastSlash));
+					}
 					const newFile = await this.app.vault.create(filePath, content);
 					// Track so a meeting shared across accounts isn't created twice this run.
 					ctx.existingDocs.set(details.id, newFile);
@@ -566,7 +583,7 @@ export default class GranolaSyncPlugin extends Plugin {
 
 interface SyncContext {
 	template: string;
-	folderPath: string;
+	folderPathPattern: string;
 	filenamePattern: string;
 	existingDocs: Map<string, TFile>;
 	emailToNoteTitle: Map<string, string>;

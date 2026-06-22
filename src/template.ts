@@ -1,4 +1,4 @@
-import { App, normalizePath, TFile } from "obsidian";
+import { App, moment, normalizePath, TFile } from "obsidian";
 import type { MeetingData, ParsedParticipant } from "./response-parser";
 import DEFAULT_TEMPLATE from "./default-template.md";
 
@@ -147,22 +147,81 @@ export function sanitizeFilename(name: string): string {
 		.trim() || "Untitled";
 }
 
+/** A `{date}` placeholder, optionally carrying a moment format: `{date:YYYY/MM}`. */
+const DATE_TOKEN = /\{date(?::([^}]+))?\}/g;
+
 /**
- * Expand `{date}`, `{title}` and `{id}` in the user's filename pattern.
+ * Meeting dates arrive as ISO `YYYY-MM-DD` strings. Parse with an explicit input
+ * format so moment never falls back to its ambiguous heuristics, then re-render
+ * in whatever the user asked for. Obsidian bundles moment and re-exports it, so
+ * the format tokens match the ones users already know from Obsidian's own date
+ * settings.
  *
- * One regex pass with a replacer function, rather than three chained
+ * `utc` because a meeting date is a bare calendar date with no time or zone —
+ * parsing it as local midnight would let a format like `{date:YYYY/MM}` land in
+ * the previous month for anyone west of UTC.
+ */
+function formatMeetingDate(date: string, format: string): string {
+	return moment.utc(date, "YYYY-MM-DD").format(format);
+}
+
+/**
+ * Expand `{date}` / `{date:FORMAT}` in a folder path, so meetings can be filed
+ * into dated subfolders like `Meetings/{date:YYYY/MM}`. Slashes in the result are
+ * meaningful here — they are what creates the nesting.
+ */
+export function resolveDatePattern(pattern: string, date: string): string {
+	return pattern.replace(DATE_TOKEN, (_, format: string | undefined) =>
+		format ? formatMeetingDate(date, format) : date,
+	);
+}
+
+/**
+ * The fixed leading part of a folder pattern, before any date token — the folder
+ * every dated subfolder lives under. Created up front so a sync still has a home
+ * folder to report against before any meeting has been placed.
+ */
+export function getFolderBasePath(folderPattern: string): string {
+	const firstToken = folderPattern.search(/\{date(?::[^}]+)?\}/);
+	if (firstToken === -1) return folderPattern;
+	return folderPattern.slice(0, firstToken).replace(/\/+$/, "");
+}
+
+/**
+ * A filename placeholder: `{date}`, `{date:FORMAT}`, `{title}` or `{id}`. Only
+ * `date` takes a format, so `{title:x}` matches nothing and stays literal, the
+ * same as any other unrecognised placeholder.
+ */
+const FILENAME_TOKEN = /\{date(?::([^}]+))?\}|\{(title|id)\}/g;
+
+/**
+ * Expand `{date}`, `{date:FORMAT}`, `{title}` and `{id}` in the user's filename
+ * pattern.
+ *
+ * One regex pass with a replacer function, rather than chained
  * `String.replace(string, string)` calls. Those interpret `$&`, `` $` `` and `$'`
  * inside the *replacement*, so a meeting titled "Q3 $& Q4" expanded to the text
  * the pattern had just matched instead of to the title. Substituting in a single
  * pass also stops an expanded value from being rescanned: a title containing the
  * literal "{id}" used to have it replaced by the meeting id.
+ *
+ * A formatted date is deliberately not sanitized. A format is the user's own
+ * configuration rather than untrusted calendar data, and a slash in one is
+ * meaningful: `{date:YYYY/MM} {title}` nests the note, the same as putting the
+ * token in the folder path. `{title}` stays sanitized because it is whatever the
+ * meeting organizer typed.
  */
 export function generateFilename(pattern: string, meeting: MeetingData): string {
 	const values: Record<string, string> = {
-		date: meeting.date,
 		title: sanitizeFilename(meeting.title),
 		id: meeting.id.slice(0, 8),
 	};
 
-	return pattern.replace(/\{(date|title|id)\}/g, (_, token: string) => values[token]);
+	return pattern.replace(
+		FILENAME_TOKEN,
+		(_, dateFormat: string | undefined, token: string | undefined) => {
+			if (token) return values[token];
+			return dateFormat ? formatMeetingDate(meeting.date, dateFormat) : meeting.date;
+		},
+	);
 }

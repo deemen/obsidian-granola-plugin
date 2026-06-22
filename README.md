@@ -56,8 +56,8 @@ To sync more than one Granola account, click **Add Granola account** in settings
 | Sync frequency | Every 15 minutes | How often to sync. Options: Manual only, On startup, 1m, 15m, 30m, 60m, 12h |
 | Only my meetings | On | Sync only meetings you recorded or were listed as a participant in, including notes shared with you. Turn off to also sync every workspace-visible meeting |
 | Sync transcripts | Off | Include full meeting transcripts (1 extra API call per meeting) |
-| Folder path | `Meetings` | Where to save meeting notes |
-| Filename pattern | `{date} {title}` | Pattern for filenames. Supports `{date}`, `{title}`, `{id}` |
+| Folder path | `Meetings` | Where to save meeting notes. Supports date formatting, e.g. `Meetings/{date:YYYY/MM}` |
+| Filename pattern | `{date} {title}` | Pattern for filenames. Supports `{date}`, `{date:YYYY-MM-DD}`, `{title}`, `{id}` |
 | Template path | `Templates/Granola.md` | Path to your template file |
 | Show ribbon icon | On | Show a sync button in the left sidebar |
 | Skip existing notes | On | Don't overwrite notes you've edited. Existing notes are matched by `granola_id` anywhere in your vault, not just the sync folder, so notes you've moved aren't duplicated |
