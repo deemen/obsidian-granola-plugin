@@ -16,10 +16,26 @@ export interface AuthStorage {
 export class GranolaAuthProvider implements OAuthClientProvider {
 	private _codeVerifier = "";
 
-	constructor(private storage: AuthStorage) {}
+	/**
+	 * @param accountId  Included as the OAuth `state` param so the redirect
+	 *   callback can be routed back to the correct account, even when several
+	 *   accounts trigger a login at once.
+	 * @param onAuthRequired  Called when a full login window is opened (i.e. the
+	 *   stored tokens could not be refreshed), so the account can be flagged as
+	 *   needing reconnection.
+	 */
+	constructor(
+		private storage: AuthStorage,
+		private accountId: string,
+		private onAuthRequired?: () => void,
+	) {}
 
 	get redirectUrl(): string {
 		return "obsidian://granola-auth";
+	}
+
+	async state(): Promise<string> {
+		return this.accountId;
 	}
 
 	get clientMetadata(): OAuthClientMetadata {
@@ -49,6 +65,7 @@ export class GranolaAuthProvider implements OAuthClientProvider {
 	}
 
 	async redirectToAuthorization(url: URL): Promise<void> {
+		this.onAuthRequired?.();
 		window.open(url.toString());
 	}
 

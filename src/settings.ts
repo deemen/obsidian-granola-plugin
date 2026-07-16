@@ -85,18 +85,34 @@ export class GranolaSyncSettingTab extends PluginSettingTab {
 				);
 		} else {
 			for (const account of connectedAccounts) {
-				new Setting(containerEl)
-					.setName(account.label || "Connected account")
-					.setDesc(account.label ? "Connected and ready to sync." : "Connected. (Account name unavailable.)")
-					.addButton((button) =>
-						button
-							.setButtonText("Disconnect")
-							.setWarning()
-							.onClick(async () => {
-								await this.plugin.disconnectAccount(account.id);
-								this.display();
-							})
+				const setting = new Setting(containerEl).setName(account.label || "Connected account");
+
+				if (account.needsReauth) {
+					setting
+						.setDesc("Reconnection required — your login expired. Sign in again to resume syncing.")
+						.addButton((button) =>
+							button
+								.setButtonText("Reconnect")
+								.setCta()
+								.onClick(() => {
+									void this.plugin.reconnectAccount(account.id);
+								})
+						);
+				} else {
+					setting.setDesc(
+						account.label ? "Connected and ready to sync." : "Connected. (Account name unavailable.)"
 					);
+				}
+
+				setting.addButton((button) =>
+					button
+						.setButtonText("Disconnect")
+						.setWarning()
+						.onClick(async () => {
+							await this.plugin.disconnectAccount(account.id);
+							this.display();
+						})
+				);
 			}
 
 			new Setting(containerEl)

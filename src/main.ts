@@ -21,6 +21,8 @@ export interface GranolaAccount {
 	label?: string;
 	oauthTokens?: OAuthTokens;
 	oauthClientInfo?: OAuthClientInformationMixed;
+	/** Set when the stored tokens could no longer be refreshed and a login is required. */
+	needsReauth?: boolean;
 }
 
 interface PluginData extends GranolaSyncSettings {
@@ -53,7 +55,7 @@ export default class GranolaSyncPlugin extends Plugin {
 		this.registerObsidianProtocolHandler("granola-auth", (params) => {
 			const code = params.code;
 			if (code) {
-				void this.handleAuthCallback(code);
+				void this.handleAuthCallback(code, params.state);
 			}
 		});
 
@@ -164,7 +166,14 @@ export default class GranolaSyncPlugin extends Plugin {
 				}
 			},
 		};
-		const auth = new GranolaAuthProvider(storage);
+		const auth = new GranolaAuthProvider(storage, account.id, () => {
+			const a = this.findAccount(account.id);
+			if (a && !a.needsReauth) {
+				a.needsReauth = true;
+				void this.savePluginData();
+				this.refreshSettingsTab();
+			}
+		});
 		const mcp = new GranolaMcpClient(auth);
 		const runtime: AccountRuntime = { auth, mcp };
 		this.runtimes.set(account.id, runtime);
@@ -206,11 +215,31 @@ export default class GranolaSyncPlugin extends Plugin {
 		new Notice("Disconnected from Granola");
 	}
 
-	private async handleAuthCallback(code: string): Promise<void> {
-		const accountId = this.pendingAuthAccountId;
+	/** Re-run the login flow for an existing account whose tokens went stale. */
+	async reconnectAccount(id: string): Promise<void> {
+		const account = this.findAccount(id);
+		if (!account) return;
+		this.pendingAuthAccountId = account.id;
+
+		const { mcp } = this.getRuntime(account);
+		try {
+			await mcp.connect();
+			// Tokens refreshed silently — no login window was needed.
+			await this.finalizeAccount(account);
+			new Notice("Reconnected to Granola!");
+			this.refreshSettingsTab();
+		} catch {
+			new Notice("Opening Granola login in your browser...");
+		}
+	}
+
+	private async handleAuthCallback(code: string, state?: string): Promise<void> {
+		// Prefer the `state` param (survives multiple concurrent logins);
+		// fall back to the pending id for older flows.
+		const accountId = state || this.pendingAuthAccountId;
 		const account = accountId ? this.findAccount(accountId) : undefined;
 		if (!account) {
-			console.error("Granola: auth callback with no pending account");
+			console.error("Granola: auth callback with no matching account");
 			return;
 		}
 		try {
@@ -234,6 +263,7 @@ export default class GranolaSyncPlugin extends Plugin {
 	/** After a successful auth, fetch the account's email/name as its label. */
 	private async finalizeAccount(account: GranolaAccount): Promise<void> {
 		const { mcp } = this.getRuntime(account);
+		account.needsReauth = false;
 		try {
 			if (!mcp.isConnected) await mcp.connect();
 			const label = parseAccountInfo(await mcp.getAccountInfo());
@@ -411,6 +441,28 @@ export default class GranolaSyncPlugin extends Plugin {
 
 		if (!mcp.isConnected) {
 			await mcp.connect();
+		}
+
+		// Connection succeeded, so the tokens are valid again.
+		if (account.needsReauth) {
+			account.needsReauth = false;
+			await this.savePluginData();
+			this.refreshSettingsTab();
+		}
+
+		// Backfill the account name if we never captured it (e.g. accounts
+		// connected before labels existed, or where the initial fetch failed).
+		if (!account.label) {
+			try {
+				const label = parseAccountInfo(await mcp.getAccountInfo());
+				if (label) {
+					account.label = label;
+					await this.savePluginData();
+					this.refreshSettingsTab();
+				}
+			} catch (error) {
+				console.error("Granola: failed to backfill account name", error);
+			}
 		}
 
 		// List meetings
