@@ -19,11 +19,11 @@ There are other ([1](https://github.com/dannymcc/Granola-to-Obsidian), [2](https
 
 ## Installation
 
-### Install from the Obsidian Directory:
+### Install from the Obsidian Directory (recommended)
 
 Click "Add to Obsidian" from https://community.obsidian.md/plugins/granola-meetings-simple-sync
 
-### Install via BRAT (recommended)
+### Install via BRAT
 1. Install the [BRAT plugin](https://github.com/TfTHacker/obsidian42-brat) from Obsidian's community plugins
 2. In BRAT settings, click **Add Beta plugin**
 3. Enter `philfreo/obsidian-granola-plugin`
