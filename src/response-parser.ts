@@ -143,28 +143,60 @@ export function parseAccountInfo(text: string): string {
 }
 
 /**
- * Parse transcript response (JSON with id, title, transcript fields)
+ * Parse transcript response (JSON with id, title, transcript fields).
+ * The response may prefix the JSON with a plain-text preamble
+ * ("The content below is meeting notes/transcripts..."), so if the full
+ * text isn't valid JSON we retry on the outermost {...} block.
  */
 export function parseTranscriptResponse(text: string): string {
-	try {
-		const data = JSON.parse(text) as { transcript?: string };
-		return data.transcript?.trim() || "";
-	} catch {
-		// If not JSON, return as-is
-		return text.trim();
+	const candidates = [text];
+	const start = text.indexOf("{");
+	const end = text.lastIndexOf("}");
+	if (start !== -1 && end > start) {
+		candidates.push(text.slice(start, end + 1));
 	}
+	for (const candidate of candidates) {
+		try {
+			const data = JSON.parse(candidate) as { transcript?: string };
+			return data.transcript?.trim() || "";
+		} catch {
+			// try next candidate
+		}
+	}
+	return text.trim();
+}
+
+// Speaker labels are capitalized words followed by a colon: "Microphone:",
+// "Speaker:", a participant's name, or "Me:"/"Them:" in older transcripts.
+const SPEAKER_LABEL = "(\\p{Lu}[\\p{L}'’.-]*(?: \\p{Lu}[\\p{L}'’.-]*){0,3}):";
+
+/**
+ * "Microphone" is the note-taker's own audio and "Speaker" is everyone
+ * else, which Granola's older transcripts labeled "Me" and "Them".
+ */
+function friendlySpeakerName(name: string): string {
+	if (name === "Microphone") return "Me";
+	if (name === "Speaker") return "Them";
+	return name;
 }
 
 /**
  * Format raw transcript text with speaker breaks for readability.
- * Raw format: " Them: text... Me: text..."
+ * Raw format: " Speaker: text...  Microphone: text..." — utterances are
+ * separated by 2+ spaces before the next speaker label.
  */
 export function formatTranscriptText(raw: string): string {
 	if (!raw) return "";
 	return raw
 		.trim()
-		.replace(/\s{2,}(Me:|Them:)/g, "\n\n**$1**")
-		.replace(/^(Me:|Them:)/, "**$1**");
+		.replace(
+			new RegExp(`\\s{2,}${SPEAKER_LABEL}`, "gu"),
+			(_, name: string) => `\n\n**${friendlySpeakerName(name)}:**`,
+		)
+		.replace(
+			new RegExp(`^${SPEAKER_LABEL}`, "u"),
+			(_, name: string) => `**${friendlySpeakerName(name)}:**`,
+		);
 }
 
 /**
