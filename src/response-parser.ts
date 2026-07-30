@@ -43,16 +43,44 @@ export function normalizeTaskItems(markdown: string): string {
 }
 
 /**
+ * Pull a double-quoted attribute value out of a `<meeting …>` open tag.
+ * Returns "" when the attribute is absent, so a server-side attribute
+ * change can never drop the whole meeting. The name must start the tag or
+ * follow whitespace, so `id` does not also match a future `meeting-id`.
+ */
+function attr(openTag: string, name: string): string {
+	const match = openTag.match(new RegExp(`(?:^|\\s)${name}="([^"]*)"`));
+	return match ? match[1] : "";
+}
+
+/**
  * Parse the XML-ish list_meetings / get_meetings response into meeting objects.
  * When called on get_meetings response, also extracts private_notes and summary.
+ *
+ * Attributes are read by name rather than by position: Granola adds and
+ * reorders them over time (list_meetings now also emits `captured_by_me`,
+ * `listed_as_participant` and `is_workspace_visible`), and a positional
+ * pattern silently matches nothing when that happens.
+ *
+ * The open-tag pattern consumes quoted values whole (`"[^"]*"`) before
+ * falling back to any character that is neither `>` nor `"`, so a `>`
+ * inside an attribute value — a title like `Q3 > Q4 Planning` — does not
+ * truncate the tag. The two alternatives are deliberately disjoint: if the
+ * fallback also accepted `"`, every quote would double the number of paths
+ * the engine explores, and a truncated response with no closing `>` would
+ * backtrack exponentially.
  */
 export function parseMeetingsResponse(xml: string): ParsedMeetingDetails[] {
 	const meetings: ParsedMeetingDetails[] = [];
-	const meetingRegex = /<meeting\s+id="([^"]+)"\s+title="([^"]*?)"\s+date="([^"]*?)">([\s\S]*?)<\/meeting>/g;
+	const meetingRegex = /<meeting\s+((?:"[^"]*"|[^>"])*?)>([\s\S]*?)<\/meeting>/g;
 
 	let match;
 	while ((match = meetingRegex.exec(xml)) !== null) {
-		const [, id, title, date, body] = match;
+		const [, openTag, body] = match;
+		const id = attr(openTag, "id");
+		if (!id) continue;
+		const title = attr(openTag, "title");
+		const date = attr(openTag, "date");
 
 		const participantsMatch = body.match(/<known_participants>\s*([\s\S]*?)\s*<\/known_participants>/);
 		const participants = participantsMatch ? parseParticipants(participantsMatch[1].trim()) : [];
