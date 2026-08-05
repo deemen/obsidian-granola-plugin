@@ -125,7 +125,7 @@ export function parseMeetingsResponse(xml: string): ParsedMeetingDetails[] {
 
 /**
  * Parse participant string like:
- * "Phil Freo (note creator) from Close <phil@close.com>, Barrett King from Close <barrett.king@close.com>"
+ * "Jane Doe (note creator) from Example Co <jane@example.com>, John Roe from Example Co <john@example.com>"
  */
 export function parseParticipants(text: string): ParsedParticipant[] {
 	if (!text.trim()) return [];
@@ -162,11 +162,11 @@ export function parseParticipants(text: string): ParsedParticipant[] {
  * Parse the get_account_info response into a human-readable label.
  *
  * The API returns JSON like:
- *   { "email": "phil@close.com",
- *     "active_workspace": { "id": "...", "display_name": "Close" } }
+ *   { "email": "jane@example.com",
+ *     "active_workspace": { "id": "...", "display_name": "Example Co" } }
  *
  * We label the account by email, appending the workspace name when present
- * (e.g. "phil@close.com (Close)") so multiple accounts are easy to tell apart.
+ * (e.g. "jane@example.com (Example Co)") so multiple accounts are easy to tell apart.
  * Falls back to scraping an email if the response isn't the expected JSON.
  */
 export function parseAccountInfo(text: string): string {

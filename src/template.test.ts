@@ -42,13 +42,13 @@ describe("applyTemplate", () => {
 	it("resolves attendee names, preferring vault note matches by email", () => {
 		const m = meeting({
 			participants: [
-				{ name: "Phil Freo", email: "phil@close.com", organization: "Close", isCreator: true },
+				{ name: "Jane Doe", email: "jane@example.com", organization: "Example Co", isCreator: true },
 				{ name: "Outside Person", email: "out@other.com", organization: "Other", isCreator: false },
 			],
 		});
-		const emailToNote = new Map([["phil@close.com", "Phil Freo (Person)"]]);
+		const emailToNote = new Map([["jane@example.com", "Jane Doe (Person)"]]);
 		const result = applyTemplate("{{granola_attendees_linked}}", m, emailToNote);
-		expect(result).toBe("[[Phil Freo (Person)]], [[Outside Person]]");
+		expect(result).toBe("[[Jane Doe (Person)]], [[Outside Person]]");
 	});
 
 	it("formats the attendee list variants", () => {

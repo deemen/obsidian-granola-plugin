@@ -44,11 +44,11 @@ describe("parseParticipants", () => {
 
 	it("parses name, org, email, and creator marker", () => {
 		const result = parseParticipants(
-			"Phil Freo (note creator) from Close <phil@close.com>, Barrett King from Close <barrett.king@close.com>",
+			"Jane Doe (note creator) from Example Co <jane@example.com>, John Roe from Example Co <john@example.com>",
 		);
 		expect(result).toEqual([
-			{ name: "Phil Freo", email: "phil@close.com", organization: "Close", isCreator: true },
-			{ name: "Barrett King", email: "barrett.king@close.com", organization: "Close", isCreator: false },
+			{ name: "Jane Doe", email: "jane@example.com", organization: "Example Co", isCreator: true },
+			{ name: "John Roe", email: "john@example.com", organization: "Example Co", isCreator: false },
 		]);
 	});
 
@@ -77,7 +77,7 @@ describe("parseMeetingsResponse", () => {
 		const xml = `
 			<meeting id="abc123" title="Weekly Sync" date="Mar 3, 2026 3:00 PM">
 				<known_participants>
-					Phil Freo (note creator) from Close <phil@close.com>
+					Jane Doe (note creator) from Example Co <jane@example.com>
 				</known_participants>
 				<private_notes>my private thoughts</private_notes>
 				<summary>## Recap\nWe discussed things.</summary>
@@ -91,7 +91,7 @@ describe("parseMeetingsResponse", () => {
 		expect(result[0].privateNotes).toBe("my private thoughts");
 		expect(result[0].summary).toBe("## Recap\nWe discussed things.");
 		expect(result[0].participants).toHaveLength(1);
-		expect(result[0].participants[0].email).toBe("phil@close.com");
+		expect(result[0].participants[0].email).toBe("jane@example.com");
 	});
 
 	it("parses multiple meetings and tolerates missing optional fields", () => {
@@ -249,10 +249,10 @@ describe("parseTranscriptResponse", () => {
 describe("parseAccountInfo", () => {
 	it("combines email and workspace from the real API shape", () => {
 		const json = JSON.stringify({
-			email: "phil@close.com",
-			active_workspace: { id: "9941", display_name: "Close" },
+			email: "jane@example.com",
+			active_workspace: { id: "1234", display_name: "Example Co" },
 		});
-		expect(parseAccountInfo(json)).toBe("phil@close.com (Close)");
+		expect(parseAccountInfo(json)).toBe("jane@example.com (Example Co)");
 	});
 
 	it("returns just the email when no workspace name is present", () => {
@@ -290,8 +290,8 @@ describe("formatTranscriptText", () => {
 	});
 
 	it("keeps named speaker labels as-is", () => {
-		const result = formatTranscriptText("Caryn Moore: hello there.  Phil Freo: hi. How are you?");
-		expect(result).toBe("**Caryn Moore:** hello there.\n\n**Phil Freo:** hi. How are you?");
+		const result = formatTranscriptText("Jane Doe: hello there.  John Roe: hi. How are you?");
+		expect(result).toBe("**Jane Doe:** hello there.\n\n**John Roe:** hi. How are you?");
 	});
 
 	it("does not break on single-spaced sentences within an utterance", () => {
