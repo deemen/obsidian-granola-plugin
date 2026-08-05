@@ -43,6 +43,30 @@ export function normalizeTaskItems(markdown: string): string {
 }
 
 /**
+ * Decode XML character entities in text pulled out of the meetings response.
+ * Granola's MCP server escapes attribute values and text content
+ * (title="Q3 Planning &amp; Review", participants like
+ * "Jane Doe &lt;jane@example.com&gt;"), so everything extracted from
+ * the XML must be decoded before it reaches filenames, wikilinks, or note
+ * bodies. Handles the five predefined entities plus numeric character
+ * references. `&amp;` is decoded last so double-escaped input ("&amp;lt;")
+ * yields the literal "&lt;" rather than "<".
+ */
+export function decodeXmlEntities(text: string): string {
+	if (!text.includes("&")) return text;
+	const fromCodePoint = (n: number) =>
+		Number.isInteger(n) && n >= 0 && n <= 0x10ffff ? String.fromCodePoint(n) : "";
+	return text
+		.replace(/&#x([0-9a-f]+);/gi, (_, hex: string) => fromCodePoint(parseInt(hex, 16)))
+		.replace(/&#(\d+);/g, (_, dec: string) => fromCodePoint(parseInt(dec, 10)))
+		.replace(/&lt;/g, "<")
+		.replace(/&gt;/g, ">")
+		.replace(/&quot;/g, '"')
+		.replace(/&apos;/g, "'")
+		.replace(/&amp;/g, "&");
+}
+
+/**
  * Pull a double-quoted attribute value out of a `<meeting …>` open tag.
  * Returns "" when the attribute is absent, so a server-side attribute
  * change can never drop the whole meeting. The name must start the tag or
@@ -50,7 +74,7 @@ export function normalizeTaskItems(markdown: string): string {
  */
 function attr(openTag: string, name: string): string {
 	const match = openTag.match(new RegExp(`(?:^|\\s)${name}="([^"]*)"`));
-	return match ? match[1] : "";
+	return match ? decodeXmlEntities(match[1]) : "";
 }
 
 /**
@@ -83,13 +107,15 @@ export function parseMeetingsResponse(xml: string): ParsedMeetingDetails[] {
 		const date = attr(openTag, "date");
 
 		const participantsMatch = body.match(/<known_participants>\s*([\s\S]*?)\s*<\/known_participants>/);
-		const participants = participantsMatch ? parseParticipants(participantsMatch[1].trim()) : [];
+		const participants = participantsMatch
+			? parseParticipants(decodeXmlEntities(participantsMatch[1].trim()))
+			: [];
 
 		const notesMatch = body.match(/<private_notes>\s*([\s\S]*?)\s*<\/private_notes>/);
-		const privateNotes = notesMatch ? normalizeTaskItems(notesMatch[1].trim()) : "";
+		const privateNotes = notesMatch ? normalizeTaskItems(decodeXmlEntities(notesMatch[1].trim())) : "";
 
 		const summaryMatch = body.match(/<summary>\s*([\s\S]*?)\s*<\/summary>/);
-		const summary = summaryMatch ? normalizeTaskItems(summaryMatch[1].trim()) : "";
+		const summary = summaryMatch ? normalizeTaskItems(decodeXmlEntities(summaryMatch[1].trim())) : "";
 
 		meetings.push({ id, title, date, participants, privateNotes, summary });
 	}

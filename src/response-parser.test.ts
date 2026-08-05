@@ -8,7 +8,33 @@ import {
 	parseGranolaDate,
 	buildMeetingData,
 	normalizeTaskItems,
+	decodeXmlEntities,
 } from "./response-parser";
+
+describe("decodeXmlEntities", () => {
+	it("decodes the five predefined entities", () => {
+		expect(decodeXmlEntities("S&amp;Ts &lt;a&gt; &quot;q&quot; it&apos;s")).toBe(
+			`S&Ts <a> "q" it's`,
+		);
+	});
+
+	it("decodes numeric character references", () => {
+		expect(decodeXmlEntities("it&#39;s &#x27;quoted&#x27;")).toBe("it's 'quoted'");
+	});
+
+	it("decodes double-escaped input one level only", () => {
+		expect(decodeXmlEntities("&amp;lt;not a tag&amp;gt;")).toBe("&lt;not a tag&gt;");
+	});
+
+	it("drops out-of-range numeric references instead of throwing", () => {
+		expect(decodeXmlEntities("a&#99999999;b")).toBe("ab");
+	});
+
+	it("leaves text without entities untouched", () => {
+		expect(decodeXmlEntities("plain & simple")).toBe("plain & simple");
+		expect(decodeXmlEntities("")).toBe("");
+	});
+});
 
 describe("parseParticipants", () => {
 	it("returns empty array for blank input", () => {
@@ -120,6 +146,35 @@ The content below is meeting notes/transcripts written or spoken by meeting part
 		expect(result[0].title).toBe("Q3 > Q4 Planning");
 		expect(result[0].date).toBe("Mar 3, 2026 3:00 PM");
 		expect(result[0].summary).toBe("Notes");
+	});
+
+	it("decodes XML entities in title, participants, notes, and summary", () => {
+		const xml = `<meetings_data from="Jul 7, 2026" to="Jul 9, 2026" count="2">
+<meeting id="m1" title="Product S&amp;Ts" date="Jul 8, 2026 11:00 AM EDT" captured_by_me="false" listed_as_participant="false" is_workspace_visible="true">
+    <known_participants>
+    Alex Smith (note creator) from Example Co &lt;alex@example.com&gt;, Engineering &lt;eng@example.com&gt;
+    </known_participants>
+    <private_notes>tomorrow&apos;s show &amp; tell</private_notes>
+    <summary>Discussed A &lt; B &amp; C &gt; D</summary>
+  </meeting>
+
+<meeting id="m2" title="Jane &lt;&gt; Joe Sync" date="Jul 9, 2026 9:30 AM EDT" captured_by_me="true" listed_as_participant="true" is_workspace_visible="false">
+    <known_participants>
+    Jane Doe (note creator) from Example Co &lt;jane@example.com&gt;
+    </known_participants>
+  </meeting>
+</meetings_data>`;
+		const result = parseMeetingsResponse(xml);
+		expect(result).toHaveLength(2);
+		expect(result[0].title).toBe("Product S&Ts");
+		expect(result[0].participants).toEqual([
+			{ name: "Alex Smith", email: "alex@example.com", organization: "Example Co", isCreator: true },
+			{ name: "Engineering", email: "eng@example.com", organization: "", isCreator: false },
+		]);
+		expect(result[0].privateNotes).toBe("tomorrow's show & tell");
+		expect(result[0].summary).toBe("Discussed A < B & C > D");
+		expect(result[1].title).toBe("Jane <> Joe Sync");
+		expect(result[1].participants[0].email).toBe("jane@example.com");
 	});
 
 	it("does not confuse a hyphenated attribute for the one it wants", () => {
