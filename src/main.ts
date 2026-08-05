@@ -13,12 +13,15 @@ import {
 	parseTranscriptResponse,
 	parseAccountInfo,
 	buildMeetingData,
+	excludeSelf,
 } from "./response-parser";
 import { loadTemplate, applyTemplate, generateFilename } from "./template";
 
 export interface GranolaAccount {
 	id: string;
 	label?: string;
+	/** Signed-in address, used to keep the account owner out of attendee lists. */
+	email?: string;
 	oauthTokens?: OAuthTokens;
 	oauthClientInfo?: OAuthClientInformationMixed;
 	/** Set when the stored tokens could no longer be refreshed and a login is required. */
@@ -266,8 +269,9 @@ export default class GranolaSyncPlugin extends Plugin {
 		account.needsReauth = false;
 		try {
 			if (!mcp.isConnected) await mcp.connect();
-			const label = parseAccountInfo(await mcp.getAccountInfo());
+			const { label, email } = parseAccountInfo(await mcp.getAccountInfo());
 			if (label) account.label = label;
+			if (email) account.email = email;
 		} catch (error) {
 			console.error("Granola: failed to fetch account info", error);
 		}
@@ -452,11 +456,12 @@ export default class GranolaSyncPlugin extends Plugin {
 
 		// Backfill the account name if we never captured it (e.g. accounts
 		// connected before labels existed, or where the initial fetch failed).
-		if (!account.label) {
+		if (!account.label || !account.email) {
 			try {
-				const label = parseAccountInfo(await mcp.getAccountInfo());
-				if (label) {
-					account.label = label;
+				const { label, email } = parseAccountInfo(await mcp.getAccountInfo());
+				if (label || email) {
+					if (label) account.label = label;
+					if (email) account.email = email;
 					await this.savePluginData();
 					this.refreshSettingsTab();
 				}
@@ -531,6 +536,9 @@ export default class GranolaSyncPlugin extends Plugin {
 				}
 
 				const meetingData = buildMeetingData(details, transcript);
+				if (this.settings.excludeSelfFromAttendees && account.email) {
+					meetingData.participants = excludeSelf(meetingData.participants, account.email);
+				}
 				const content = applyTemplate(ctx.template, meetingData, ctx.emailToNoteTitle);
 				const existingFile = ctx.existingDocs.get(details.id);
 

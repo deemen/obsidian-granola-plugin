@@ -38,6 +38,7 @@ export interface GranolaSyncSettings {
 	showRibbonIcon: boolean;
 	skipExistingNotes: boolean;
 	matchAttendeesByEmail: boolean;
+	excludeSelfFromAttendees: boolean;
 	syncTimeRange: SyncTimeRange;
 	syncTranscripts: boolean;
 	onlyMyMeetings: boolean;
@@ -51,6 +52,7 @@ export const DEFAULT_SETTINGS: GranolaSyncSettings = {
 	showRibbonIcon: true,
 	skipExistingNotes: true,
 	matchAttendeesByEmail: true,
+	excludeSelfFromAttendees: true,
 	syncTimeRange: "last_30_days",
 	syncTranscripts: false,
 	onlyMyMeetings: true,
@@ -269,6 +271,20 @@ export class GranolaSyncSettingTab extends PluginSettingTab {
 					.setValue(this.plugin.settings.skipExistingNotes)
 					.onChange(async (value) => {
 						this.plugin.settings.skipExistingNotes = value;
+						await this.plugin.saveSettings();
+					})
+			);
+
+		new Setting(containerEl)
+			.setName("Exclude yourself from attendees")
+			.setDesc(
+				"Leave your own Granola account out of the attendee list, since you are listed on every meeting you take part in."
+			)
+			.addToggle((toggle) =>
+				toggle
+					.setValue(this.plugin.settings.excludeSelfFromAttendees)
+					.onChange(async (value) => {
+						this.plugin.settings.excludeSelfFromAttendees = value;
 						await this.plugin.saveSettings();
 					})
 			);

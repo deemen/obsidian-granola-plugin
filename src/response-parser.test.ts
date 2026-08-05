@@ -9,6 +9,7 @@ import {
 	buildMeetingData,
 	normalizeTaskItems,
 	decodeXmlEntities,
+	excludeSelf,
 } from "./response-parser";
 
 describe("decodeXmlEntities", () => {
@@ -252,25 +253,66 @@ describe("parseAccountInfo", () => {
 			email: "jane@example.com",
 			active_workspace: { id: "1234", display_name: "Example Co" },
 		});
-		expect(parseAccountInfo(json)).toBe("jane@example.com (Example Co)");
+		expect(parseAccountInfo(json)).toEqual({
+			label: "jane@example.com (Example Co)",
+			email: "jane@example.com",
+		});
 	});
 
 	it("returns just the email when no workspace name is present", () => {
-		expect(parseAccountInfo('{"email":"a@b.com"}')).toBe("a@b.com");
-		expect(parseAccountInfo('{"email":"a@b.com","active_workspace":null}')).toBe("a@b.com");
+		expect(parseAccountInfo('{"email":"a@b.com"}')).toEqual({ label: "a@b.com", email: "a@b.com" });
+		expect(parseAccountInfo('{"email":"a@b.com","active_workspace":null}')).toEqual({
+			label: "a@b.com",
+			email: "a@b.com",
+		});
 	});
 
-	it("returns the workspace name when there is no email", () => {
-		expect(parseAccountInfo('{"active_workspace":{"display_name":"Solo"}}')).toBe("Solo");
+	it("returns the workspace name and no email when there is no email", () => {
+		expect(parseAccountInfo('{"active_workspace":{"display_name":"Solo"}}')).toEqual({
+			label: "Solo",
+			email: "",
+		});
 	});
 
 	it("scrapes an email out of non-JSON text", () => {
-		expect(parseAccountInfo("Signed in as user@example.com today")).toBe("user@example.com");
+		expect(parseAccountInfo("Signed in as user@example.com today")).toEqual({
+			label: "user@example.com",
+			email: "user@example.com",
+		});
 	});
 
-	it("returns empty string for blank input", () => {
-		expect(parseAccountInfo("")).toBe("");
-		expect(parseAccountInfo("   ")).toBe("");
+	it("returns blanks for blank input", () => {
+		expect(parseAccountInfo("")).toEqual({ label: "", email: "" });
+		expect(parseAccountInfo("   ")).toEqual({ label: "", email: "" });
+	});
+});
+
+describe("excludeSelf", () => {
+	const participants = [
+		{ name: "Jane Doe", email: "jane@example.com", organization: "Example Co", isCreator: true },
+		{ name: "John Roe", email: "john@example.com", organization: "Example Co", isCreator: false },
+	];
+
+	it("drops the account owner from the attendee list", () => {
+		expect(excludeSelf(participants, "jane@example.com").map((p) => p.name)).toEqual(["John Roe"]);
+	});
+
+	it("matches regardless of case or surrounding whitespace", () => {
+		expect(excludeSelf(participants, "  JANE@Example.COM ").map((p) => p.name)).toEqual(["John Roe"]);
+	});
+
+	it("drops the owner even when a colleague created the note", () => {
+		expect(excludeSelf(participants, "john@example.com").map((p) => p.name)).toEqual(["Jane Doe"]);
+	});
+
+	it("returns the list untouched when the account email is unknown", () => {
+		expect(excludeSelf(participants, "")).toEqual(participants);
+		expect(excludeSelf(participants, "   ")).toEqual(participants);
+	});
+
+	it("keeps participants whose email was never parsed", () => {
+		const anonymous = [{ name: "Guest", email: "", organization: "", isCreator: false }];
+		expect(excludeSelf(anonymous, "jane@example.com")).toEqual(anonymous);
 	});
 });
 

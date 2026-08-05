@@ -158,8 +158,15 @@ export function parseParticipants(text: string): ParsedParticipant[] {
 	}).filter((p) => p.name || p.email);
 }
 
+export interface AccountIdentity {
+	/** Human-readable label for the settings UI, e.g. "jane@example.com (Example Co)". */
+	label: string;
+	/** The signed-in address, kept separately so participants can be matched against it. */
+	email: string;
+}
+
 /**
- * Parse the get_account_info response into a human-readable label.
+ * Parse the get_account_info response into the account's label and email.
  *
  * The API returns JSON like:
  *   { "email": "jane@example.com",
@@ -169,8 +176,8 @@ export function parseParticipants(text: string): ParsedParticipant[] {
  * (e.g. "jane@example.com (Example Co)") so multiple accounts are easy to tell apart.
  * Falls back to scraping an email if the response isn't the expected JSON.
  */
-export function parseAccountInfo(text: string): string {
-	if (!text?.trim()) return "";
+export function parseAccountInfo(text: string): AccountIdentity {
+	if (!text?.trim()) return { label: "", email: "" };
 
 	try {
 		const data = JSON.parse(text) as {
@@ -182,18 +189,37 @@ export function parseAccountInfo(text: string): string {
 			typeof data.active_workspace?.display_name === "string"
 				? data.active_workspace.display_name.trim()
 				: "";
-		if (email && workspace) return `${email} (${workspace})`;
-		if (email) return email;
-		if (workspace) return workspace;
+		if (email && workspace) return { label: `${email} (${workspace})`, email };
+		if (email) return { label: email, email };
+		if (workspace) return { label: workspace, email: "" };
 	} catch {
 		// not JSON — fall through to text scraping
 	}
 
 	// Fall back to scraping an email address out of the text.
 	const emailMatch = text.match(/[^\s<>"]+@[^\s<>"]+\.[^\s<>"]+/);
-	if (emailMatch) return emailMatch[0];
+	if (emailMatch) return { label: emailMatch[0], email: emailMatch[0] };
 
-	return text.trim().split("\n")[0].trim();
+	return { label: text.trim().split("\n")[0].trim(), email: "" };
+}
+
+/**
+ * Drop the signed-in user from a participant list.
+ *
+ * Granola lists the account owner in every meeting's known_participants —
+ * as "(note creator)" on meetings they recorded, and as a plain participant
+ * on meetings a colleague recorded — so notes would otherwise always name
+ * their own author as an attendee. Matching is by email rather than the
+ * isCreator flag, which marks whoever captured the note and would remove
+ * the wrong person on a colleague's meeting.
+ */
+export function excludeSelf(
+	participants: ParsedParticipant[],
+	selfEmail: string,
+): ParsedParticipant[] {
+	const self = selfEmail.trim().toLowerCase();
+	if (!self) return participants;
+	return participants.filter((p) => p.email.trim().toLowerCase() !== self);
 }
 
 /**
