@@ -7,6 +7,30 @@ const MCP_SERVER_URL = "https://mcp.granola.ai/mcp";
 
 export type SyncTimeRange = "this_week" | "last_week" | "last_30_days";
 
+/**
+ * Build the list_meetings arguments.
+ *
+ * With no involvement filter the API returns every meeting the account can
+ * see, which includes workspace-visible meetings the user neither recorded
+ * nor attended. Setting both involvement conditions to true asks for
+ * "captured by me OR listed as a participant" — the two ways the user is
+ * actually part of a meeting — which keeps notes shared with them by a
+ * colleague while dropping the rest of the workspace.
+ *
+ * `workspace_only` is deliberately never sent: it is an AND filter that
+ * would restrict the results to workspace-visible meetings only.
+ */
+export function buildListMeetingsArgs(
+	timeRange: SyncTimeRange,
+	onlyMyMeetings: boolean,
+): Record<string, unknown> {
+	const args: Record<string, unknown> = { time_range: timeRange };
+	if (onlyMyMeetings) {
+		args.involvement = { captured_by_me: true, listed_as_participant: true };
+	}
+	return args;
+}
+
 export class GranolaMcpClient {
 	private client: Client | null = null;
 	private authProvider: GranolaAuthProvider;
@@ -58,8 +82,8 @@ export class GranolaMcpClient {
 		await transport.finishAuth(authorizationCode);
 	}
 
-	async listMeetings(timeRange: SyncTimeRange): Promise<string> {
-		return this.callToolText("list_meetings", { time_range: timeRange });
+	async listMeetings(timeRange: SyncTimeRange, onlyMyMeetings: boolean): Promise<string> {
+		return this.callToolText("list_meetings", buildListMeetingsArgs(timeRange, onlyMyMeetings));
 	}
 
 	async getMeetings(meetingIds: string[]): Promise<string> {

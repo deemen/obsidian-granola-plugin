@@ -40,6 +40,7 @@ export interface GranolaSyncSettings {
 	matchAttendeesByEmail: boolean;
 	syncTimeRange: SyncTimeRange;
 	syncTranscripts: boolean;
+	onlyMyMeetings: boolean;
 }
 
 export const DEFAULT_SETTINGS: GranolaSyncSettings = {
@@ -52,6 +53,7 @@ export const DEFAULT_SETTINGS: GranolaSyncSettings = {
 	matchAttendeesByEmail: true,
 	syncTimeRange: "last_30_days",
 	syncTranscripts: false,
+	onlyMyMeetings: true,
 };
 
 export class GranolaSyncSettingTab extends PluginSettingTab {
@@ -173,6 +175,20 @@ export class GranolaSyncSettingTab extends PluginSettingTab {
 						this.plugin.setupSyncInterval();
 					});
 			});
+
+		new Setting(containerEl)
+			.setName("Only my meetings")
+			.setDesc(
+				"Sync only meetings you recorded or were listed as a participant in, including notes shared with you. Disable to also sync every workspace-visible meeting."
+			)
+			.addToggle((toggle) =>
+				toggle
+					.setValue(this.plugin.settings.onlyMyMeetings)
+					.onChange(async (value) => {
+						this.plugin.settings.onlyMyMeetings = value;
+						await this.plugin.saveSettings();
+					})
+			);
 
 		new Setting(containerEl)
 			.setName("Sync transcripts")

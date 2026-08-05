@@ -468,7 +468,10 @@ export default class GranolaSyncPlugin extends Plugin {
 		// List meetings
 		let listResponse: string;
 		try {
-			listResponse = await mcp.listMeetings(this.settings.syncTimeRange);
+			listResponse = await mcp.listMeetings(
+				this.settings.syncTimeRange,
+				this.settings.onlyMyMeetings,
+			);
 		} catch (error) {
 			// Disconnect so we retry connection next time
 			await mcp.disconnect();
