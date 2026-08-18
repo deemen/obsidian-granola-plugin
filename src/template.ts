@@ -79,10 +79,47 @@ export function applyTemplate(
 	return result;
 }
 
+/** Characters no filename may contain on Windows or macOS. */
+const UNSAFE_FILENAME_CHARS = /[/\\?%*:|"<>]/g;
+
+/**
+ * C0 and C1 control characters. Titles copied out of a multi-line calendar
+ * invite arrive with the newline still attached, and a newline is not a
+ * filesystem-unsafe character, so it used to survive into the filename.
+ */
+const CONTROL_CHARS = /\p{Cc}/gu;
+
+const MAX_FILENAME_LENGTH = 100;
+
+/**
+ * Turn a meeting title into a filename component.
+ *
+ * Granola titles come straight from calendar events, so they carry whatever the
+ * organizer typed: a trailing newline, a stray tab, an emoji, or nothing but
+ * punctuation. Control characters are folded into spaces and runs of whitespace
+ * collapsed, because a filename containing a raw newline is legal on macOS but
+ * unusable everywhere else.
+ *
+ * Truncation counts code points rather than UTF-16 units: `String.slice` cuts an
+ * emoji in half at the boundary and leaves a lone surrogate in the name. Trailing
+ * spaces and dots are stripped after the cut rather than before, so truncation
+ * cannot reintroduce one — Windows rejects both, and a leading dot would hide the
+ * note. A title that is entirely unsafe characters would otherwise reduce to a row
+ * of hyphens, so an empty result falls back to "Untitled".
+ */
 export function sanitizeFilename(name: string): string {
-	return name
-		.replace(/[/\\?%*:|"<>]/g, "-")
-		.slice(0, 100);
+	const cleaned = name
+		.replace(CONTROL_CHARS, " ")
+		.replace(UNSAFE_FILENAME_CHARS, "-")
+		.replace(/\s+/g, " ")
+		.trim();
+
+	const truncated = Array.from(cleaned).slice(0, MAX_FILENAME_LENGTH).join("");
+
+	return truncated
+		.replace(/^\.+/, "")
+		.replace(/[ .]+$/, "")
+		.trim() || "Untitled";
 }
 
 export function generateFilename(pattern: string, meeting: MeetingData): string {

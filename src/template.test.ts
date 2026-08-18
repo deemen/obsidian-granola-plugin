@@ -72,6 +72,33 @@ describe("sanitizeFilename", () => {
 	it("truncates to 100 characters", () => {
 		expect(sanitizeFilename("x".repeat(150))).toHaveLength(100);
 	});
+
+	it("folds control characters into spaces", () => {
+		expect(sanitizeFilename("Weekly Sync\n")).toBe("Weekly Sync");
+		expect(sanitizeFilename("Weekly\tSync")).toBe("Weekly Sync");
+		expect(sanitizeFilename("Weekly\r\nSync")).toBe("Weekly Sync");
+	});
+
+	it("collapses runs of whitespace", () => {
+		expect(sanitizeFilename("Weekly   Sync")).toBe("Weekly Sync");
+	});
+
+	it("strips leading and trailing spaces and dots", () => {
+		expect(sanitizeFilename("  Weekly Sync  ")).toBe("Weekly Sync");
+		expect(sanitizeFilename("Weekly Sync...")).toBe("Weekly Sync");
+		expect(sanitizeFilename(".hidden")).toBe("hidden");
+	});
+
+	it("does not split a surrogate pair at the truncation boundary", () => {
+		const title = "x".repeat(99) + "\u{1F600}";
+		expect(sanitizeFilename(title)).toBe(title);
+	});
+
+	it("falls back to a placeholder when nothing survives", () => {
+		expect(sanitizeFilename("")).toBe("Untitled");
+		expect(sanitizeFilename("   ")).toBe("Untitled");
+		expect(sanitizeFilename("...")).toBe("Untitled");
+	});
 });
 
 describe("generateFilename", () => {
