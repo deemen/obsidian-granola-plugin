@@ -89,6 +89,15 @@ const UNSAFE_FILENAME_CHARS = /[/\\?%*:|"<>]/g;
  */
 const CONTROL_CHARS = /\p{Cc}/gu;
 
+/**
+ * Legal in a filename, but each one breaks an Obsidian [[wikilink]] pointing at
+ * the note: `#` opens a heading reference, `^` a block reference, and `]]` closes
+ * the link early. Meeting notes are linked from daily notes and MOCs, so a title
+ * like "Q3 [draft] #planning" would otherwise produce a note nothing can link to.
+ * (`|`, the alias separator, is already covered as a filesystem-unsafe character.)
+ */
+const WIKILINK_UNSAFE_CHARS = /[#^[\]]/g;
+
 const MAX_FILENAME_LENGTH = 100;
 
 /**
@@ -111,6 +120,7 @@ export function sanitizeFilename(name: string): string {
 	const cleaned = name
 		.replace(CONTROL_CHARS, " ")
 		.replace(UNSAFE_FILENAME_CHARS, "-")
+		.replace(WIKILINK_UNSAFE_CHARS, "-")
 		.replace(/\s+/g, " ")
 		.trim();
 

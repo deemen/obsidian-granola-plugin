@@ -73,6 +73,10 @@ describe("sanitizeFilename", () => {
 		expect(sanitizeFilename("x".repeat(150))).toHaveLength(100);
 	});
 
+	it("replaces characters that would break a wikilink to the note", () => {
+		expect(sanitizeFilename("Q3 [draft] #planning ^v2")).toBe("Q3 -draft- -planning -v2");
+	});
+
 	it("folds control characters into spaces", () => {
 		expect(sanitizeFilename("Weekly Sync\n")).toBe("Weekly Sync");
 		expect(sanitizeFilename("Weekly\tSync")).toBe("Weekly Sync");
