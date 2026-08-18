@@ -122,12 +122,22 @@ export function sanitizeFilename(name: string): string {
 		.trim() || "Untitled";
 }
 
+/**
+ * Expand `{date}`, `{title}` and `{id}` in the user's filename pattern.
+ *
+ * One regex pass with a replacer function, rather than three chained
+ * `String.replace(string, string)` calls. Those interpret `$&`, `` $` `` and `$'`
+ * inside the *replacement*, so a meeting titled "Q3 $& Q4" expanded to the text
+ * the pattern had just matched instead of to the title. Substituting in a single
+ * pass also stops an expanded value from being rescanned: a title containing the
+ * literal "{id}" used to have it replaced by the meeting id.
+ */
 export function generateFilename(pattern: string, meeting: MeetingData): string {
-	const title = sanitizeFilename(meeting.title);
-	const id = meeting.id.slice(0, 8);
+	const values: Record<string, string> = {
+		date: meeting.date,
+		title: sanitizeFilename(meeting.title),
+		id: meeting.id.slice(0, 8),
+	};
 
-	return pattern
-		.replace("{date}", meeting.date)
-		.replace("{title}", title)
-		.replace("{id}", id);
+	return pattern.replace(/\{(date|title|id)\}/g, (_, token: string) => values[token]);
 }

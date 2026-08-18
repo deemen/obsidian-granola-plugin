@@ -110,4 +110,20 @@ describe("generateFilename", () => {
 	it("sanitizes the title within the filename", () => {
 		expect(generateFilename("{title}", meeting({ title: "Q1/Q2 Review" }))).toBe("Q1-Q2 Review");
 	});
+
+	it("keeps $ replacement patterns in the title literal", () => {
+		expect(generateFilename("{title}", meeting({ title: "Q3 $& Q4" }))).toBe("Q3 $& Q4");
+		expect(generateFilename("{title}", meeting({ title: "Q3 $` Q4" }))).toBe("Q3 $` Q4");
+		expect(generateFilename("{title}", meeting({ title: "Q3 $' Q4" }))).toBe("Q3 $' Q4");
+	});
+
+	it("does not re-expand a placeholder that came from the title", () => {
+		expect(generateFilename("{title}", meeting({ title: "Ticket {id} review" }))).toBe(
+			"Ticket {id} review",
+		);
+	});
+
+	it("expands every occurrence of a placeholder", () => {
+		expect(generateFilename("{date} {date}", meeting())).toBe("2026-03-03 2026-03-03");
+	});
 });
