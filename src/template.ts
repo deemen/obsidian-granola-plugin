@@ -90,6 +90,17 @@ const UNSAFE_FILENAME_CHARS = /[/\\?%*:|"<>]/g;
 const CONTROL_CHARS = /\p{Cc}/gu;
 
 /**
+ * Zero-width format characters: the zero-width space, the soft hyphen, the bidi
+ * marks and the BOM. They render as nothing, so a title carrying one looks
+ * identical to one that doesn't and no [[wikilink]] a reader types by hand can
+ * resolve — the same failure as a trailing space, just invisible in the file
+ * explorer too. Dropped rather than folded into a space so the visible title is
+ * unchanged. The zero-width joiner (U+200D) is excluded: it is what holds a
+ * multi-part emoji together, and dropping it would split one glyph into several.
+ */
+const FORMAT_CHARS = /(?!\u200d)\p{Cf}/gu;
+
+/**
  * Legal in a filename, but each one breaks an Obsidian [[wikilink]] pointing at
  * the note: `#` opens a heading reference, `^` a block reference, and `]]` closes
  * the link early. Meeting notes are linked from daily notes and MOCs, so a title
@@ -107,18 +118,22 @@ const MAX_FILENAME_LENGTH = 100;
  * organizer typed: a trailing newline, a stray tab, an emoji, or nothing but
  * punctuation. Control characters are folded into spaces and runs of whitespace
  * collapsed, because a filename containing a raw newline is legal on macOS but
- * unusable everywhere else.
+ * unusable everywhere else; zero-width characters are dropped outright, since a
+ * space in their place would show up in a name that looked fine before.
  *
  * Truncation counts code points rather than UTF-16 units: `String.slice` cuts an
  * emoji in half at the boundary and leaves a lone surrogate in the name. Trailing
- * spaces and dots are stripped after the cut rather than before, so truncation
- * cannot reintroduce one — Windows rejects both, and a leading dot would hide the
- * note. A title that is entirely unsafe characters would otherwise reduce to a row
- * of hyphens, so an empty result falls back to "Untitled".
+ * spaces, dots and hyphens are stripped after the cut rather than before, so
+ * truncation cannot reintroduce one — Windows rejects a trailing space or dot, and
+ * a leading dot would hide the note. Hyphens are trimmed only at the edges, never
+ * collapsed inside, so "Q1/Q2" stays "Q1-Q2". A title made entirely of unsafe
+ * characters reduces to a row of hyphens and therefore to nothing, so it falls
+ * back to "Untitled".
  */
 export function sanitizeFilename(name: string): string {
 	const cleaned = name
 		.replace(CONTROL_CHARS, " ")
+		.replace(FORMAT_CHARS, "")
 		.replace(UNSAFE_FILENAME_CHARS, "-")
 		.replace(WIKILINK_UNSAFE_CHARS, "-")
 		.replace(/\s+/g, " ")
@@ -127,8 +142,8 @@ export function sanitizeFilename(name: string): string {
 	const truncated = Array.from(cleaned).slice(0, MAX_FILENAME_LENGTH).join("");
 
 	return truncated
-		.replace(/^\.+/, "")
-		.replace(/[ .]+$/, "")
+		.replace(/^[.-]+/, "")
+		.replace(/[ .-]+$/, "")
 		.trim() || "Untitled";
 }
 

@@ -103,6 +103,31 @@ describe("sanitizeFilename", () => {
 		expect(sanitizeFilename("   ")).toBe("Untitled");
 		expect(sanitizeFilename("...")).toBe("Untitled");
 	});
+
+	it("falls back to a placeholder when a title is entirely unsafe characters", () => {
+		expect(sanitizeFilename("???")).toBe("Untitled");
+		expect(sanitizeFilename("###")).toBe("Untitled");
+		expect(sanitizeFilename("[[]]")).toBe("Untitled");
+		expect(sanitizeFilename("//")).toBe("Untitled");
+	});
+
+	it("trims hyphens at the edges without collapsing them inside", () => {
+		expect(sanitizeFilename("-Weekly Sync-")).toBe("Weekly Sync");
+		expect(sanitizeFilename("Q1/Q2")).toBe("Q1-Q2");
+		expect(sanitizeFilename("Q1 // Q2")).toBe("Q1 -- Q2");
+	});
+
+	it("drops zero-width characters that would break a wikilink", () => {
+		expect(sanitizeFilename("Weekly\u200BSync")).toBe("WeeklySync");
+		expect(sanitizeFilename("Weekly Sync\u200B")).toBe("Weekly Sync");
+		expect(sanitizeFilename("Weekly\u00ADSync")).toBe("WeeklySync");
+		expect(sanitizeFilename("Weekly\u202ESync")).toBe("WeeklySync");
+	});
+
+	it("keeps a zero-width joiner so multi-part emoji survive intact", () => {
+		const title = "Standup \u{1F469}\u200D\u{1F4BB}";
+		expect(sanitizeFilename(title)).toBe(title);
+	});
 });
 
 describe("generateFilename", () => {
