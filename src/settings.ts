@@ -264,7 +264,7 @@ export class GranolaSyncSettingTab extends PluginSettingTab {
 		new Setting(containerEl)
 			.setName("Skip existing notes")
 			.setDesc(
-				"When enabled, existing notes won't be overwritten. Disable to update notes when Granola data changes."
+				"When enabled, existing notes won't be overwritten. Disable to update notes when Granola data changes. Existing notes are matched by `granola_id` anywhere in your vault, not just the sync folder."
 			)
 			.addToggle((toggle) =>
 				toggle

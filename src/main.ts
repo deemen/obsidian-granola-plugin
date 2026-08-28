@@ -8,6 +8,7 @@ import {
 } from "./settings";
 import { GranolaAuthProvider, type AuthStorage } from "./auth";
 import { GranolaMcpClient } from "./mcp-client";
+import { syncFolderFirst } from "./note-scope";
 import {
 	parseMeetingsResponse,
 	parseTranscriptResponse,
@@ -368,15 +369,16 @@ export default class GranolaSyncPlugin extends Plugin {
 			}
 		}
 
-		// Build map of existing granola_id -> file (shared across all accounts)
+		// Build map of existing granola_id -> file (shared across all accounts).
+		// Searched vault-wide: granola_id is ours, so a note moved out of the sync
+		// folder is still recognized and updated rather than duplicated. Sync folder
+		// first, so its copy wins if the same meeting exists in two places.
 		const existingDocs = new Map<string, TFile>();
 		const files = this.app.vault.getMarkdownFiles();
-		const folderPrefix = folderPath + "/";
-		for (const file of files) {
-			if (!file.path.startsWith(folderPrefix)) continue;
+		for (const file of syncFolderFirst(files, folderPath)) {
 			const fileCache = this.app.metadataCache.getFileCache(file);
 			const granolaId = fileCache?.frontmatter?.granola_id as string | undefined;
-			if (granolaId) {
+			if (granolaId && !existingDocs.has(granolaId)) {
 				existingDocs.set(granolaId, file);
 			}
 		}
