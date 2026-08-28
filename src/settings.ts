@@ -163,7 +163,17 @@ export class GranolaSyncSettingTab extends PluginSettingTab {
 				{
 					name: "Sync now",
 					desc: "Manually sync meetings from Granola",
-					action: () => void this.plugin.syncMeetings(true),
+					// A button rather than an `action` row: nothing marks a row as
+					// clickable, and `action`'s row-index argument shows it is meant
+					// for list entries, not a standalone command.
+					render: (setting) => {
+						setting.addButton((button) =>
+							button
+								.setButtonText("Sync now")
+								.setCta()
+								.onClick(() => void this.plugin.syncMeetings(true))
+						);
+					},
 				},
 				{
 					name: "Time range",
