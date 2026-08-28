@@ -220,3 +220,22 @@ export function generateFilename(pattern: string, meeting: MeetingData): string 
 		.replace(/\{(title|id)\}/g, (_, token: string) => values[token])
 		.replace(UNSAFE_FILENAME_CHARS, "-");
 }
+
+/**
+ * Where a meeting's note belongs: the folder to create, and the note's full path.
+ *
+ * Both come back from one place because they have to agree — the path is built by
+ * joining the folder to the filename, and `normalizePath` is what reconciles the
+ * separators, dropping a trailing slash the user typed and collapsing the one this
+ * join adds. A folder setting of "Meetings/" therefore behaves exactly like
+ * "Meetings", and a setting of "/" files notes at the vault root.
+ */
+export function resolveNotePath(
+	folderPattern: string,
+	filenamePattern: string,
+	meeting: MeetingData,
+): { folder: string; path: string } {
+	const folder = normalizePath(resolveDatePattern(folderPattern, meeting.date));
+	const filename = generateFilename(filenamePattern, meeting);
+	return { folder, path: normalizePath(`${folder}/${filename}.md`) };
+}

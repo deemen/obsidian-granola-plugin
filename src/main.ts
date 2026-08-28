@@ -16,7 +16,7 @@ import {
 	buildMeetingData,
 	excludeSelf,
 } from "./response-parser";
-import { loadTemplate, applyTemplate, generateFilename, getFolderBasePath, resolveDatePattern } from "./template";
+import { loadTemplate, applyTemplate, getFolderBasePath, resolveNotePath } from "./template";
 
 export interface GranolaAccount {
 	id: string;
@@ -579,11 +579,13 @@ export default class GranolaSyncPlugin extends Plugin {
 					await this.app.vault.modify(existingFile, content);
 					updated++;
 				} else {
-					const folderPath = normalizePath(resolveDatePattern(ctx.folderPathPattern, meetingData.date));
-					await this.ensureFolderExists(folderPath);
-					const filename = generateFilename(ctx.filenamePattern, meetingData);
-					const filePath = normalizePath(`${folderPath}/${filename}.md`);
-					const newFile = await this.app.vault.create(filePath, content);
+					const { folder, path } = resolveNotePath(
+						ctx.folderPathPattern,
+						ctx.filenamePattern,
+						meetingData,
+					);
+					await this.ensureFolderExists(folder);
+					const newFile = await this.app.vault.create(path, content);
 					// Track so a meeting shared across accounts isn't created twice this run.
 					ctx.existingDocs.set(details.id, newFile);
 					created++;

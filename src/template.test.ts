@@ -1,5 +1,12 @@
 import { describe, it, expect } from "vitest";
-import { applyTemplate, sanitizeFilename, generateFilename, getFolderBasePath, resolveDatePattern } from "./template";
+import {
+	applyTemplate,
+	sanitizeFilename,
+	generateFilename,
+	getFolderBasePath,
+	resolveDatePattern,
+	resolveNotePath,
+} from "./template";
 import type { MeetingData } from "./response-parser";
 
 function meeting(overrides: Partial<MeetingData> = {}): MeetingData {
@@ -223,5 +230,40 @@ describe("generateFilename", () => {
 
 	it("expands every occurrence of a placeholder", () => {
 		expect(generateFilename("{date} {date}", meeting())).toBe("2026-03-03 2026-03-03");
+	});
+});
+
+describe("resolveNotePath", () => {
+	const build = (folderPattern: string) => resolveNotePath(folderPattern, "{date} {title}", meeting());
+
+	it("files a note under the folder pattern", () => {
+		expect(build("Meetings")).toEqual({
+			folder: "Meetings",
+			path: "Meetings/2026-03-03 Weekly Sync.md",
+		});
+	});
+
+	it("ignores slashes around the folder setting", () => {
+		for (const setting of ["Meetings/", "/Meetings", "/Meetings/", "Meetings//"]) {
+			expect(build(setting)).toEqual(build("Meetings"));
+		}
+	});
+
+	it("files at the vault root when the folder path is a bare slash", () => {
+		expect(build("/").path).toBe("2026-03-03 Weekly Sync.md");
+	});
+
+	it("expands date tokens into the folder, not the filename", () => {
+		expect(build("Meetings/{date:YYYY/MM}")).toEqual({
+			folder: "Meetings/2026/03",
+			path: "Meetings/2026/03/2026-03-03 Weekly Sync.md",
+		});
+	});
+
+	it("keeps an undated meeting in the base folder", () => {
+		expect(resolveNotePath("Meetings/{date:YYYY/MM}", "{title}", meeting({ date: "" }))).toEqual({
+			folder: "Meetings",
+			path: "Meetings/Weekly Sync.md",
+		});
 	});
 });
