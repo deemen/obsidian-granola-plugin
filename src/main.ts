@@ -49,6 +49,7 @@ export default class GranolaSyncPlugin extends Plugin {
 	private isSyncing = false;
 	private syncIntervalId: number | null = null;
 	private ribbonIconEl: HTMLElement | null = null;
+	private settingTab: GranolaSyncSettingTab | null = null;
 	private runtimes = new Map<string, AccountRuntime>();
 	private pendingAuthAccountId: string | null = null;
 	/** Folders created or confirmed during the current sync run. */
@@ -88,7 +89,8 @@ export default class GranolaSyncPlugin extends Plugin {
 		});
 
 		// Add settings tab
-		this.addSettingTab(new GranolaSyncSettingTab(this.app, this));
+		this.settingTab = new GranolaSyncSettingTab(this.app, this);
+		this.addSettingTab(this.settingTab);
 
 		// Handle startup sync and intervals
 		this.app.workspace.onLayoutReady(() => {
@@ -281,11 +283,9 @@ export default class GranolaSyncPlugin extends Plugin {
 		await this.savePluginData();
 	}
 
+	/** Re-read the setting definitions so account rows reflect the current state. */
 	private refreshSettingsTab(): void {
-		const appWithSetting = this.app as typeof this.app & {
-			setting: { activeTab?: { display?: () => void } };
-		};
-		appWithSetting.setting.activeTab?.display?.();
+		this.settingTab?.update();
 	}
 
 	async loadSettings(): Promise<void> {
@@ -312,6 +312,48 @@ export default class GranolaSyncPlugin extends Plugin {
 		delete this.pluginData.oauthTokens;
 		delete this.pluginData.oauthClientInfo;
 		this.pluginData.accounts = this.accounts;
+	}
+
+	/**
+	 * `data.json` was rewritten underneath us — with the vault on a file sync,
+	 * that is usually another machine storing tokens it just refreshed. Adopt
+	 * them: keeping the copy loaded at startup means the next local write puts
+	 * stale tokens back, and once the refresh token has rotated that signs both
+	 * machines out.
+	 */
+	override async onExternalSettingsChange(): Promise<void> {
+		const previousAccounts = this.accounts;
+		const previousFrequency = this.settings.syncFrequency;
+
+		await this.loadSettings();
+
+		// A login in flight is only in our copy — the machine that wrote this
+		// file has never heard of it. Without this the OAuth callback comes back
+		// to no account and the sign-in has to be started over.
+		const pending = previousAccounts.find((a) => a.id === this.pendingAuthAccountId);
+		if (pending && !this.findAccount(pending.id)) {
+			this.accounts.push(pending);
+			this.pluginData.accounts = this.accounts;
+		}
+
+		// Drop the clients for accounts disconnected on the other machine.
+		for (const account of previousAccounts) {
+			if (!this.findAccount(account.id)) {
+				const runtime = this.runtimes.get(account.id);
+				if (runtime) {
+					void runtime.mcp.disconnect();
+					this.runtimes.delete(account.id);
+				}
+			}
+		}
+
+		// Only on a real change: restarting the timer resets its countdown, and
+		// the other machine's own syncs write this file on their own schedule.
+		if (this.settings.syncFrequency !== previousFrequency) {
+			this.setupSyncInterval();
+		}
+		this.updateRibbonIcon();
+		this.refreshSettingsTab();
 	}
 
 	async saveSettings(): Promise<void> {

@@ -1,5 +1,7 @@
-import { App, PluginSettingTab, Setting } from "obsidian";
+import { App, PluginSettingTab } from "obsidian";
+import type { SettingDefinitionItem, SettingGroupItem } from "obsidian";
 import type GranolaSyncPlugin from "./main";
+import type { GranolaAccount } from "./main";
 import type { SyncTimeRange } from "./mcp-client";
 
 export type SyncFrequency = "manual" | "startup" | "1m" | "15m" | "30m" | "60m" | "12h";
@@ -58,6 +60,8 @@ export const DEFAULT_SETTINGS: GranolaSyncSettings = {
 	onlyMyMeetings: true,
 };
 
+type SettingKey = keyof GranolaSyncSettings;
+
 export class GranolaSyncSettingTab extends PluginSettingTab {
 	plugin: GranolaSyncPlugin;
 
@@ -66,241 +70,220 @@ export class GranolaSyncSettingTab extends PluginSettingTab {
 		this.plugin = plugin;
 	}
 
-	override display(): void {
-		const { containerEl } = this;
-		containerEl.empty();
+	override getSettingDefinitions(): SettingDefinitionItem<SettingKey>[] {
+		return [this.accountsList(), this.syncGroup(), this.notesGroup()];
+	}
 
-		// --- Granola accounts section ---
-		new Setting(containerEl).setName("Granola accounts").setHeading();
+	/**
+	 * Persist through the plugin rather than the inherited default, which writes
+	 * `plugin.settings` straight to data.json — that file also carries the stored
+	 * OAuth accounts, so a direct write would drop them and force a re-login.
+	 * Settings whose value drives live state apply it here too.
+	 */
+	override async setControlValue(key: string, value: unknown): Promise<void> {
+		Object.assign(this.plugin.settings, { [key]: value });
+		await this.plugin.saveSettings();
 
-		const connectedAccounts = this.plugin.accounts.filter((a) => a.oauthTokens !== undefined);
+		if (key === "syncFrequency") this.plugin.setupSyncInterval();
+		if (key === "showRibbonIcon") this.plugin.updateRibbonIcon();
+	}
 
-		if (connectedAccounts.length === 0) {
-			new Setting(containerEl)
-				.setName("Not connected")
-				.setDesc("Connect a Granola account to sync meetings via the official API.")
-				.addButton((button) =>
+	private accountsList(): SettingDefinitionItem<SettingKey> {
+		const connected = this.plugin.accounts.filter((a) => a.oauthTokens !== undefined);
+
+		return {
+			type: "list",
+			heading: "Granola accounts",
+			addItem: {
+				name: "Add Granola account",
+				action: () => void this.plugin.addAccount(),
+			},
+			items:
+				connected.length === 0
+					? [this.connectPrompt()]
+					: connected.map((account) => this.accountRow(account)),
+		};
+	}
+
+	private connectPrompt(): SettingGroupItem<SettingKey> {
+		return {
+			name: "Not connected",
+			desc: "Connect a Granola account to sync meetings via the official API.",
+			aliases: ["sign in", "log in", "oauth"],
+			render: (setting) => {
+				setting.addButton((button) =>
 					button
 						.setButtonText("Connect to Granola")
 						.setCta()
-						.onClick(() => {
-							void this.plugin.addAccount();
-						})
+						.onClick(() => void this.plugin.addAccount())
 				);
-		} else {
-			for (const account of connectedAccounts) {
-				const setting = new Setting(containerEl).setName(account.label || "Connected account");
+			},
+		};
+	}
 
+	private accountRow(account: GranolaAccount): SettingGroupItem<SettingKey> {
+		return {
+			name: account.label || "Connected account",
+			desc: account.needsReauth
+				? "Reconnection required — your login expired. Sign in again to resume syncing."
+				: account.label
+					? "Connected and ready to sync."
+					: "Connected. (Account name unavailable.)",
+			// The row's name is the account label, so search needs the words a
+			// user would actually type to find it.
+			aliases: ["granola account", "disconnect", "reconnect", "sign out"],
+			render: (setting) => {
 				if (account.needsReauth) {
-					setting
-						.setDesc("Reconnection required — your login expired. Sign in again to resume syncing.")
-						.addButton((button) =>
-							button
-								.setButtonText("Reconnect")
-								.setCta()
-								.onClick(() => {
-									void this.plugin.reconnectAccount(account.id);
-								})
-						);
-				} else {
-					setting.setDesc(
-						account.label ? "Connected and ready to sync." : "Connected. (Account name unavailable.)"
+					setting.addButton((button) =>
+						button
+							.setButtonText("Reconnect")
+							.setCta()
+							.onClick(() => void this.plugin.reconnectAccount(account.id))
 					);
 				}
 
 				setting.addButton((button) =>
 					button
 						.setButtonText("Disconnect")
-						.setWarning()
+						.setDestructive()
 						.onClick(async () => {
 							await this.plugin.disconnectAccount(account.id);
-							this.display();
+							this.update();
 						})
 				);
-			}
+			},
+		};
+	}
 
-			new Setting(containerEl)
-				.setName("Add another account")
-				.setDesc("Connect an additional Granola account to also sync into the same folder.")
-				.addButton((button) =>
-					button
-						.setButtonText("Add Granola account")
-						.setCta()
-						.onClick(() => {
-							void this.plugin.addAccount();
-						})
-				);
-		}
+	private syncGroup(): SettingDefinitionItem<SettingKey> {
+		return {
+			type: "group",
+			heading: "Sync",
+			items: [
+				{
+					name: "Sync now",
+					desc: "Manually sync meetings from Granola",
+					action: () => void this.plugin.syncMeetings(true),
+				},
+				{
+					name: "Time range",
+					desc: "How far back to look for meetings when syncing",
+					control: {
+						type: "dropdown",
+						key: "syncTimeRange",
+						options: SYNC_TIME_RANGE_OPTIONS,
+						defaultValue: DEFAULT_SETTINGS.syncTimeRange,
+					},
+				},
+				{
+					name: "Sync frequency",
+					desc: "How often to automatically sync meetings from Granola",
+					control: {
+						type: "dropdown",
+						key: "syncFrequency",
+						options: SYNC_FREQUENCY_OPTIONS,
+						defaultValue: DEFAULT_SETTINGS.syncFrequency,
+					},
+				},
+				{
+					name: "Only my meetings",
+					desc: "Sync only meetings you recorded or were listed as a participant in, including notes shared with you. Disable to also sync every workspace-visible meeting.",
+					control: {
+						type: "toggle",
+						key: "onlyMyMeetings",
+						defaultValue: DEFAULT_SETTINGS.onlyMyMeetings,
+					},
+				},
+				{
+					name: "Sync transcripts",
+					desc: "Include full meeting transcripts. Each meeting requires an extra API call.",
+					control: {
+						type: "toggle",
+						key: "syncTranscripts",
+						defaultValue: DEFAULT_SETTINGS.syncTranscripts,
+					},
+				},
+			],
+		};
+	}
 
-		// --- Sync section ---
-		new Setting(containerEl).setName("Sync").setHeading();
-
-		new Setting(containerEl)
-			.setName("Sync now")
-			.setDesc("Manually sync meetings from Granola")
-			.addButton((button) =>
-				button
-					.setButtonText("Sync now")
-					.setCta()
-					.onClick(() => {
-						void this.plugin.syncMeetings(true);
-					})
-			);
-
-		new Setting(containerEl)
-			.setName("Time range")
-			.setDesc("How far back to look for meetings when syncing")
-			.addDropdown((dropdown) => {
-				for (const [value, label] of Object.entries(SYNC_TIME_RANGE_OPTIONS)) {
-					dropdown.addOption(value, label);
-				}
-				dropdown
-					.setValue(this.plugin.settings.syncTimeRange)
-					.onChange(async (value) => {
-						this.plugin.settings.syncTimeRange = value as SyncTimeRange;
-						await this.plugin.saveSettings();
-					});
-			});
-
-		new Setting(containerEl)
-			.setName("Sync frequency")
-			.setDesc("How often to automatically sync meetings from Granola")
-			.addDropdown((dropdown) => {
-				for (const [value, label] of Object.entries(SYNC_FREQUENCY_OPTIONS)) {
-					dropdown.addOption(value, label);
-				}
-				dropdown
-					.setValue(this.plugin.settings.syncFrequency)
-					.onChange(async (value) => {
-						this.plugin.settings.syncFrequency = value as SyncFrequency;
-						await this.plugin.saveSettings();
-						this.plugin.setupSyncInterval();
-					});
-			});
-
-		new Setting(containerEl)
-			.setName("Only my meetings")
-			.setDesc(
-				"Sync only meetings you recorded or were listed as a participant in, including notes shared with you. Disable to also sync every workspace-visible meeting."
-			)
-			.addToggle((toggle) =>
-				toggle
-					.setValue(this.plugin.settings.onlyMyMeetings)
-					.onChange(async (value) => {
-						this.plugin.settings.onlyMyMeetings = value;
-						await this.plugin.saveSettings();
-					})
-			);
-
-		new Setting(containerEl)
-			.setName("Sync transcripts")
-			.setDesc(
-				"Include full meeting transcripts. Each meeting requires an extra API call."
-			)
-			.addToggle((toggle) =>
-				toggle
-					.setValue(this.plugin.settings.syncTranscripts)
-					.onChange(async (value) => {
-						this.plugin.settings.syncTranscripts = value;
-						await this.plugin.saveSettings();
-					})
-			);
-
-		// --- Notes section ---
-		new Setting(containerEl).setName("Notes").setHeading();
-
-		new Setting(containerEl)
-			.setName("Folder path")
-			.setDesc("Where to save meeting notes. Takes date tokens, so Meetings/{date:YYYY/MM} files each meeting into a subfolder for its month.")
-			.addText((text) =>
-				text
-					.setPlaceholder("Meetings")
-					.setValue(this.plugin.settings.folderPath)
-					.onChange(async (value) => {
-						this.plugin.settings.folderPath = value;
-						await this.plugin.saveSettings();
-					})
-			);
-
-		new Setting(containerEl)
-			.setName("Filename pattern")
-			.setDesc("Pattern for note filenames. Available: {date}, {date:YYYY-MM-DD}, {title}, {id}")
-			.addText((text) =>
-				text
-					.setPlaceholder("{date} {title}")
-					.setValue(this.plugin.settings.filenamePattern)
-					.onChange(async (value) => {
-						this.plugin.settings.filenamePattern = value;
-						await this.plugin.saveSettings();
-					})
-			);
-
-		new Setting(containerEl)
-			.setName("Template path")
-			.setDesc("Path to template file in your vault")
-			.addText((text) =>
-				text
-					.setPlaceholder("Templates/granola-meeting.md")
-					.setValue(this.plugin.settings.templatePath)
-					.onChange(async (value) => {
-						this.plugin.settings.templatePath = value;
-						await this.plugin.saveSettings();
-					})
-			);
-
-		new Setting(containerEl)
-			.setName("Show ribbon icon")
-			.setDesc("Show a sync button in the left ribbon")
-			.addToggle((toggle) =>
-				toggle
-					.setValue(this.plugin.settings.showRibbonIcon)
-					.onChange(async (value) => {
-						this.plugin.settings.showRibbonIcon = value;
-						await this.plugin.saveSettings();
-						this.plugin.updateRibbonIcon();
-					})
-			);
-
-		new Setting(containerEl)
-			.setName("Skip existing notes")
-			.setDesc(
-				"When enabled, existing notes won't be overwritten. Disable to update notes when Granola data changes. Existing notes are matched by `granola_id` anywhere in your vault, not just the sync folder."
-			)
-			.addToggle((toggle) =>
-				toggle
-					.setValue(this.plugin.settings.skipExistingNotes)
-					.onChange(async (value) => {
-						this.plugin.settings.skipExistingNotes = value;
-						await this.plugin.saveSettings();
-					})
-			);
-
-		new Setting(containerEl)
-			.setName("Exclude yourself from attendees")
-			.setDesc(
-				"Leave your own Granola account out of the attendee list, since you are listed on every meeting you take part in."
-			)
-			.addToggle((toggle) =>
-				toggle
-					.setValue(this.plugin.settings.excludeSelfFromAttendees)
-					.onChange(async (value) => {
-						this.plugin.settings.excludeSelfFromAttendees = value;
-						await this.plugin.saveSettings();
-					})
-			);
-
-		new Setting(containerEl)
-			.setName("Match attendees by email")
-			.setDesc(
-				"Link attendees to existing notes that have a matching email in their 'emails' frontmatter property."
-			)
-			.addToggle((toggle) =>
-				toggle
-					.setValue(this.plugin.settings.matchAttendeesByEmail)
-					.onChange(async (value) => {
-						this.plugin.settings.matchAttendeesByEmail = value;
-						await this.plugin.saveSettings();
-					})
-			);
+	private notesGroup(): SettingDefinitionItem<SettingKey> {
+		return {
+			type: "group",
+			heading: "Notes",
+			items: [
+				{
+					name: "Folder path",
+					desc: "Where to save meeting notes. Takes date tokens, so Meetings/{date:YYYY/MM} files each meeting into a subfolder for its month.",
+					// Plain text rather than a folder suggester: the value is a pattern,
+					// and date tokens name folders that don't exist yet.
+					control: {
+						type: "text",
+						key: "folderPath",
+						placeholder: "Meetings",
+						defaultValue: DEFAULT_SETTINGS.folderPath,
+					},
+				},
+				{
+					name: "Filename pattern",
+					desc: "Pattern for note filenames. Available: {date}, {date:YYYY-MM-DD}, {title}, {id}",
+					control: {
+						type: "text",
+						key: "filenamePattern",
+						placeholder: "{date} {title}",
+						defaultValue: DEFAULT_SETTINGS.filenamePattern,
+						validate: (value) =>
+							value.trim() ? undefined : "Enter a pattern — notes need a filename.",
+					},
+				},
+				{
+					name: "Template path",
+					desc: "Path to template file in your vault. Created with the default template if it doesn't exist yet.",
+					control: {
+						type: "file",
+						key: "templatePath",
+						placeholder: "Templates/granola-meeting.md",
+						defaultValue: DEFAULT_SETTINGS.templatePath,
+						filter: (file) => file.extension === "md",
+					},
+				},
+				{
+					name: "Show ribbon icon",
+					desc: "Show a sync button in the left ribbon",
+					control: {
+						type: "toggle",
+						key: "showRibbonIcon",
+						defaultValue: DEFAULT_SETTINGS.showRibbonIcon,
+					},
+				},
+				{
+					name: "Skip existing notes",
+					desc: "When enabled, existing notes won't be overwritten. Disable to update notes when Granola data changes. Existing notes are matched by `granola_id` anywhere in your vault, not just the sync folder.",
+					control: {
+						type: "toggle",
+						key: "skipExistingNotes",
+						defaultValue: DEFAULT_SETTINGS.skipExistingNotes,
+					},
+				},
+				{
+					name: "Exclude yourself from attendees",
+					desc: "Leave your own Granola account out of the attendee list, since you are listed on every meeting you take part in.",
+					control: {
+						type: "toggle",
+						key: "excludeSelfFromAttendees",
+						defaultValue: DEFAULT_SETTINGS.excludeSelfFromAttendees,
+					},
+				},
+				{
+					name: "Match attendees by email",
+					desc: "Link attendees to existing notes that have a matching email in their 'emails' frontmatter property.",
+					control: {
+						type: "toggle",
+						key: "matchAttendeesByEmail",
+						defaultValue: DEFAULT_SETTINGS.matchAttendeesByEmail,
+					},
+				},
+			],
+		};
 	}
 }
