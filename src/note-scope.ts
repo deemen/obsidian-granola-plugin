@@ -7,10 +7,18 @@
  * caller keeps the first file it sees for a given id, so leading with the sync
  * folder is what decides the winner when a meeting exists in two places.
  *
+ * An empty `folderPath` means the folder pattern is all date tokens, so notes are
+ * filed from the vault root down. Every note is already inside it, leaving nothing
+ * to hoist — returned untouched rather than prefix-matching on "/", which no vault
+ * path starts with and which would therefore hoist nothing while looking like it
+ * had considered the question.
+ *
  * Generic over `{ path }` rather than taking `TFile` so it can be tested without
  * an Obsidian runtime.
  */
 export function syncFolderFirst<T extends { path: string }>(files: T[], folderPath: string): T[] {
+	if (!folderPath) return files;
+
 	const folderPrefix = folderPath + "/";
 	return [
 		...files.filter((f) => f.path.startsWith(folderPrefix)),

@@ -51,6 +51,8 @@ export default class GranolaSyncPlugin extends Plugin {
 	private ribbonIconEl: HTMLElement | null = null;
 	private runtimes = new Map<string, AccountRuntime>();
 	private pendingAuthAccountId: string | null = null;
+	/** Folders created or confirmed during the current sync run. */
+	private ensuredFolders = new Set<string>();
 
 	override async onload(): Promise<void> {
 		await this.loadSettings();
@@ -325,6 +327,8 @@ export default class GranolaSyncPlugin extends Plugin {
 	async syncMeetings(manual = false): Promise<void> {
 		if (this.isSyncing) return;
 		this.isSyncing = true;
+		// Folders can be deleted between runs, so never trust the last run's memo.
+		this.ensuredFolders.clear();
 
 		try {
 			await this.doSync(manual);
@@ -356,9 +360,14 @@ export default class GranolaSyncPlugin extends Plugin {
 			return;
 		}
 
-		// Ensure folder exists
+		// Create the fixed part of the folder pattern up front, so a folder problem
+		// is reported once here rather than per meeting — the dated subfolders below
+		// are created lazily as meetings land in them.
 		const folderPathPattern = normalizePath(folderPathSetting);
-		const folderBasePath = normalizePath(getFolderBasePath(folderPathPattern) || DEFAULT_SETTINGS.folderPath);
+		// "" when the pattern is all date tokens (`{date:YYYY/MM}`): notes are filed
+		// from the vault root down, so there is no static folder to pre-create and no
+		// folder narrower than the vault for the scan below to prefer.
+		const folderBasePath = getFolderBasePath(folderPathPattern);
 		try {
 			await this.ensureFolderExists(folderBasePath);
 		} catch (error) {
@@ -439,17 +448,28 @@ export default class GranolaSyncPlugin extends Plugin {
 		}
 	}
 
+	/**
+	 * Create `folderPath` and any missing parents.
+	 *
+	 * Walks the path a segment at a time rather than handing the whole thing to
+	 * `vault.createFolder`, whose recursive behaviour is not part of its documented
+	 * contract. Every confirmed segment is remembered for the rest of the run, so a
+	 * sync filing 100 meetings into one dated folder checks the vault index once
+	 * instead of once per note.
+	 */
 	private async ensureFolderExists(folderPath: string): Promise<void> {
 		const normalizedPath = normalizePath(folderPath);
-		const parts = normalizedPath.split("/").filter(Boolean);
-		let currentPath = "";
+		if (this.ensuredFolders.has(normalizedPath)) return;
 
-		for (const part of parts) {
+		let currentPath = "";
+		for (const part of normalizedPath.split("/").filter(Boolean)) {
 			currentPath = currentPath ? `${currentPath}/${part}` : part;
 			if (!this.app.vault.getAbstractFileByPath(currentPath)) {
 				await this.app.vault.createFolder(currentPath);
 			}
+			this.ensuredFolders.add(currentPath);
 		}
+		this.ensuredFolders.add(normalizedPath);
 	}
 
 	/** Sync a single account into the shared folder, mutating ctx.existingDocs. */
@@ -563,10 +583,6 @@ export default class GranolaSyncPlugin extends Plugin {
 					await this.ensureFolderExists(folderPath);
 					const filename = generateFilename(ctx.filenamePattern, meetingData);
 					const filePath = normalizePath(`${folderPath}/${filename}.md`);
-					const lastSlash = filePath.lastIndexOf("/");
-					if (lastSlash > 0) {
-						await this.ensureFolderExists(filePath.substring(0, lastSlash));
-					}
 					const newFile = await this.app.vault.create(filePath, content);
 					// Track so a meeting shared across accounts isn't created twice this run.
 					ctx.existingDocs.set(details.id, newFile);

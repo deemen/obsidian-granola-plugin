@@ -160,9 +160,18 @@ const DATE_TOKEN = /\{date(?::([^}]+))?\}/g;
  * `utc` because a meeting date is a bare calendar date with no time or zone —
  * parsing it as local midnight would let a format like `{date:YYYY/MM}` land in
  * the previous month for anyone west of UTC.
+ *
+ * Parsing is strict, which is safe because `parseGranolaDate` always emits a
+ * zero-padded `YYYY-MM-DD` — and it also gives us a usable invalid signal. That
+ * matters: a meeting whose date Granola sends in a form `Date` cannot read comes
+ * through as "", and `moment.format` renders any invalid date as the literal
+ * "Invalid date". Falling back to the raw value instead means a formatted token
+ * degrades exactly like a bare `{date}` does, so an undated meeting lands in the
+ * base folder rather than in one named "Invalid date".
  */
 function formatMeetingDate(date: string, format: string): string {
-	return moment.utc(date, "YYYY-MM-DD").format(format);
+	const parsed = moment.utc(date, "YYYY-MM-DD", true);
+	return parsed.isValid() ? parsed.format(format) : date;
 }
 
 /**
@@ -182,34 +191,24 @@ export function resolveDatePattern(pattern: string, date: string): string {
  * folder to report against before any meeting has been placed.
  */
 export function getFolderBasePath(folderPattern: string): string {
-	const firstToken = folderPattern.search(/\{date(?::[^}]+)?\}/);
-	if (firstToken === -1) return folderPattern;
-	return folderPattern.slice(0, firstToken).replace(/\/+$/, "");
+	// split returns the whole string as one element when there is no date token.
+	return folderPattern.split(DATE_TOKEN)[0].replace(/\/+$/, "");
 }
-
-/**
- * A filename placeholder: `{date}`, `{date:FORMAT}`, `{title}` or `{id}`. Only
- * `date` takes a format, so `{title:x}` matches nothing and stays literal, the
- * same as any other unrecognised placeholder.
- */
-const FILENAME_TOKEN = /\{date(?::([^}]+))?\}|\{(title|id)\}/g;
 
 /**
  * Expand `{date}`, `{date:FORMAT}`, `{title}` and `{id}` in the user's filename
  * pattern.
  *
- * One regex pass with a replacer function, rather than chained
- * `String.replace(string, string)` calls. Those interpret `$&`, `` $` `` and `$'`
- * inside the *replacement*, so a meeting titled "Q3 $& Q4" expanded to the text
- * the pattern had just matched instead of to the title. Substituting in a single
- * pass also stops an expanded value from being rescanned: a title containing the
- * literal "{id}" used to have it replaced by the meeting id.
+ * Both passes use a replacer function rather than `String.replace(string, string)`,
+ * which interprets `$&`, `` $` `` and `$'` inside the *replacement* — a meeting
+ * titled "Q3 $& Q4" used to expand to the text the pattern had just matched. Title
+ * and id share one pass so an expanded value is never rescanned: a title containing
+ * the literal "{id}" used to have it replaced by the meeting id.
  *
- * A formatted date is deliberately not sanitized. A format is the user's own
- * configuration rather than untrusted calendar data, and a slash in one is
- * meaningful: `{date:YYYY/MM} {title}` nests the note, the same as putting the
- * token in the folder path. `{title}` stays sanitized because it is whatever the
- * meeting organizer typed.
+ * The result is a file *name*, never a path: a separator surviving from a format
+ * like `{date:YYYY/MM}`, or typed into the pattern directly, is folded to a hyphen
+ * rather than quietly nesting the note. Subfolders are the folder setting's job,
+ * which takes the same date tokens.
  */
 export function generateFilename(pattern: string, meeting: MeetingData): string {
 	const values: Record<string, string> = {
@@ -217,11 +216,7 @@ export function generateFilename(pattern: string, meeting: MeetingData): string 
 		id: meeting.id.slice(0, 8),
 	};
 
-	return pattern.replace(
-		FILENAME_TOKEN,
-		(_, dateFormat: string | undefined, token: string | undefined) => {
-			if (token) return values[token];
-			return dateFormat ? formatMeetingDate(meeting.date, dateFormat) : meeting.date;
-		},
-	);
+	return resolveDatePattern(pattern, meeting.date)
+		.replace(/\{(title|id)\}/g, (_, token: string) => values[token])
+		.replace(UNSAFE_FILENAME_CHARS, "-");
 }

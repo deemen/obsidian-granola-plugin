@@ -27,6 +27,12 @@ describe("syncFolderFirst", () => {
 		]);
 	});
 
+	it("keeps vault order when there is no sync folder to prefer", () => {
+		// An all-date-token folder pattern files notes from the vault root down.
+		const vault = [{ path: "Projects/apollo.md" }, { path: "2026/03/weekly.md" }];
+		expect(paths(syncFolderFirst(vault, ""))).toEqual(["Projects/apollo.md", "2026/03/weekly.md"]);
+	});
+
 	it("returns every note even when the sync folder is empty", () => {
 		const vault = [{ path: "Projects/apollo.md" }, { path: "top-level.md" }];
 		expect(paths(syncFolderFirst(vault, "Meetings"))).toEqual([
