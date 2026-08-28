@@ -248,11 +248,15 @@ export class GranolaSyncSettingTab extends PluginSettingTab {
 				},
 				{
 					name: "Template path",
-					desc: "Path to template file in your vault. Created with the default template if it doesn't exist yet.",
+					desc: "Path to template file in your vault. A default one is created when the plugin is first enabled.",
+					// A picker, so it can only choose files that already exist — which
+					// is why the plugin writes the default template on enable rather
+					// than waiting for the first sync. To start a new template from
+					// the default, duplicate that file in the vault and pick the copy.
 					control: {
 						type: "file",
 						key: "templatePath",
-						placeholder: "Templates/granola-meeting.md",
+						placeholder: DEFAULT_SETTINGS.templatePath,
 						defaultValue: DEFAULT_SETTINGS.templatePath,
 						filter: (file) => file.extension === "md",
 					},

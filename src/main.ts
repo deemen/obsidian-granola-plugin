@@ -101,6 +101,18 @@ export default class GranolaSyncPlugin extends Plugin {
 		});
 	}
 
+	/**
+	 * Runs once, when the user first enables the plugin. Write the default
+	 * template now rather than leaving it to the first sync: the template path
+	 * setting is a file picker, so it can only offer a file that already exists.
+	 * Sync still creates one on demand, which covers the file being deleted later.
+	 */
+	override onUserEnable(): void {
+		void loadTemplate(this.app, this.settings.templatePath).catch((error: unknown) => {
+			console.error("Granola: failed to create the default template", error);
+		});
+	}
+
 	override onunload(): void {
 		this.clearSyncInterval();
 		for (const runtime of this.runtimes.values()) {

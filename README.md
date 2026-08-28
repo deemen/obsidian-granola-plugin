@@ -104,7 +104,7 @@ Use `{{#variable}}...{{/variable}}` to only render content when a variable is no
 
 ### Default Template
 
-If no template exists at the configured path, the plugin creates this default:
+The plugin writes this default template when you first enable it, and again at sync time if no template exists at the configured path:
 
 ```markdown
 ---
