@@ -76,6 +76,7 @@ type SettingKey = keyof GranolaSyncSettings;
 export class GranolaSyncSettingTab extends PluginSettingTab {
 	plugin: GranolaSyncPlugin;
 	private unbindProgress: (() => void) | null = null;
+	private unbindCacheProgress: (() => void) | null = null;
 
 	constructor(app: App, plugin: GranolaSyncPlugin) {
 		super(app, plugin);
@@ -87,6 +88,10 @@ export class GranolaSyncSettingTab extends PluginSettingTab {
 		if (this.unbindProgress) {
 			this.unbindProgress();
 			this.unbindProgress = null;
+		}
+		if (this.unbindCacheProgress) {
+			this.unbindCacheProgress();
+			this.unbindCacheProgress = null;
 		}
 	}
 
@@ -362,11 +367,26 @@ export class GranolaSyncSettingTab extends PluginSettingTab {
 						const statusEl = setting.controlEl.createSpan({
 							cls: "granola-cache-status-text",
 						});
-						statusEl.setText("Loading cache status...");
-						void this.plugin.cacheStore.getStats().then((stats) => {
-							statusEl.setText(
-								`${stats.meetingCount} meeting${stats.meetingCount !== 1 ? "s" : ""}, ${stats.transcriptCount} transcript${stats.transcriptCount !== 1 ? "s" : ""}`,
-							);
+						const refreshStatus = () => {
+							void this.plugin.cacheStore.getStats().then((stats) => {
+								statusEl.setText(
+									`${stats.meetingCount} meeting${stats.meetingCount !== 1 ? "s" : ""}, ${stats.transcriptCount} transcript${stats.transcriptCount !== 1 ? "s" : ""}`,
+								);
+							});
+						};
+						refreshStatus();
+
+						if (this.unbindCacheProgress) {
+							this.unbindCacheProgress();
+						}
+						this.unbindCacheProgress = this.plugin.onProgress((state) => {
+							if (
+								state.phase === "idle" ||
+								state.phase === "meetings" ||
+								(state.phase === "transcripts" && state.countdownSeconds === undefined)
+							) {
+								refreshStatus();
+							}
 						});
 					},
 				},
