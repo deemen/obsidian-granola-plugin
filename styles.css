@@ -19,3 +19,26 @@
 	color: var(--text-muted);
 }
 
+.granola-collapsible-details {
+	width: 100%;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-m);
+	padding: var(--size-4-2) var(--size-4-3);
+	margin-top: var(--size-4-2);
+}
+
+.granola-collapsible-summary {
+	cursor: pointer;
+	font-weight: var(--font-semibold);
+	color: var(--text-muted);
+	user-select: none;
+	outline: none;
+}
+
+.granola-collapsible-summary:hover {
+	color: var(--text-normal);
+}
+
+.granola-collapsible-details[open] .granola-collapsible-summary {
+	margin-bottom: var(--size-4-2);
+}

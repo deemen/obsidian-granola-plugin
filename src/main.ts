@@ -5,6 +5,7 @@ import {
 	DEFAULT_SETTINGS,
 	GranolaSyncSettingTab,
 	SYNC_FREQUENCY_MS,
+	migrateSettings,
 } from "./settings";
 import { GranolaAuthProvider, type AuthStorage } from "./auth";
 import { GranolaMcpClient } from "./mcp-client";
@@ -172,6 +173,30 @@ export default class GranolaSyncPlugin extends Plugin {
 			id: "rerender-notes-from-cache",
 			name: "Re-render notes from cache",
 			callback: () => void this.reRenderAllNotesFromCache(),
+		});
+
+		this.addCommand({
+			id: "reroute-notes",
+			name: "Re-route notes to match folder pattern",
+			callback: () => void this.reRouteAllNotes(),
+		});
+
+		this.addCommand({
+			id: "rerender-transcripts-from-cache",
+			name: "Re-render transcripts from cache",
+			callback: () => void this.reRenderAllTranscriptsFromCache(),
+		});
+
+		this.addCommand({
+			id: "reroute-transcripts",
+			name: "Re-route transcripts to match folder pattern",
+			callback: () => void this.reRouteAllTranscripts(),
+		});
+
+		this.addCommand({
+			id: "clear-cache",
+			name: "Clear local cache",
+			callback: () => void this.clearCache(),
 		});
 
 		this.addCommand({
@@ -411,8 +436,9 @@ export default class GranolaSyncPlugin extends Plugin {
 
 	async loadSettings(): Promise<void> {
 		const data = (await this.loadData()) as Partial<PluginData> | null;
-		this.pluginData = { ...DEFAULT_SETTINGS, ...data };
-		this.settings = { ...DEFAULT_SETTINGS, ...data };
+		const migrated = migrateSettings(data ?? {});
+		this.pluginData = { ...migrated, ...data };
+		this.settings = migrated;
 
 		// Migrate old autoSyncOnStartup setting
 		if (data?.autoSyncOnStartup !== undefined && !data.syncFrequency) {
@@ -575,43 +601,8 @@ export default class GranolaSyncPlugin extends Plugin {
 
 		// Build map of existing granola_id -> file (shared across all accounts).
 		// Notes with type: transcript go to existingTranscripts; others go to existingDocs.
-		const existingDocs = new Map<string, TFile>();
-		const existingTranscripts = new Map<string, TFile>();
-		const files = this.app.vault.getMarkdownFiles();
-		for (const file of syncFolderFirst(files, folderBasePath)) {
-			const fileCache = this.app.metadataCache.getFileCache(file);
-			const granolaId = fileCache?.frontmatter?.granola_id as string | undefined;
-			const type = fileCache?.frontmatter?.type as string | undefined;
-			if (granolaId) {
-				if (type === "transcript") {
-					if (!existingTranscripts.has(granolaId)) {
-						existingTranscripts.set(granolaId, file);
-					}
-				} else {
-					if (!existingDocs.has(granolaId)) {
-						existingDocs.set(granolaId, file);
-					}
-				}
-			}
-		}
-
-		// Build map of email -> note title for attendee matching (shared)
-		const emailToNoteTitle = new Map<string, string>();
-		if (this.settings.matchAttendeesByEmail) {
-			for (const file of files) {
-				const fileCache = this.app.metadataCache.getFileCache(file);
-				const emails: unknown = fileCache?.frontmatter?.emails;
-				if (Array.isArray(emails)) {
-					for (const email of emails) {
-						if (typeof email === "string") {
-							emailToNoteTitle.set(email.toLowerCase(), file.basename);
-						}
-					}
-				} else if (typeof emails === "string") {
-					emailToNoteTitle.set(emails.toLowerCase(), file.basename);
-				}
-			}
-		}
+		const { existingDocs, existingTranscripts, emailToNoteTitle } =
+			this.indexVaultFiles(folderBasePath);
 
 		const ctx: SyncContext = {
 			template,
@@ -651,7 +642,7 @@ export default class GranolaSyncPlugin extends Plugin {
 			const accountSuffix =
 				connectedAccounts.length > 1 ? ` across ${connectedAccounts.length} accounts` : "";
 			let message: string;
-			if (this.settings.skipExistingNotes) {
+			if (!this.settings.updateNoteContent && !this.settings.rerouteExistingNotes) {
 				message = `Synced ${created} new meeting${created !== 1 ? "s" : ""} (${skipped} skipped)${accountSuffix}`;
 			} else {
 				message = `Synced ${created} new, ${updated} updated meeting${created + updated !== 1 ? "s" : ""}${accountSuffix}`;
@@ -683,20 +674,10 @@ export default class GranolaSyncPlugin extends Plugin {
 			this.settings.transcriptFolder || DEFAULT_SETTINGS.transcriptFolder;
 		const transcriptFilenamePattern =
 			this.settings.transcriptFilenamePattern || DEFAULT_SETTINGS.transcriptFilenamePattern;
-		const transcriptTemplatePath =
-			this.settings.transcriptTemplatePath || DEFAULT_SETTINGS.transcriptTemplatePath;
 
 		let template: string;
-		let transcriptTemplate = "";
 		try {
 			template = await loadTemplate(this.app, templatePath);
-			if (this.settings.syncTranscripts) {
-				transcriptTemplate = await loadTemplate(
-					this.app,
-					transcriptTemplatePath,
-					DEFAULT_TRANSCRIPT_TEMPLATE,
-				);
-			}
 		} catch (error) {
 			const message = error instanceof Error ? error.message : "Unknown error";
 			new Notice(`Error loading template: ${message}`);
@@ -713,6 +694,351 @@ export default class GranolaSyncPlugin extends Plugin {
 			return;
 		}
 
+		const { existingDocs, existingTranscripts, emailToNoteTitle } =
+			this.indexVaultFiles(folderBasePath);
+
+		const accountEmails = new Set<string>();
+		if (this.settings.excludeSelfFromAttendees) {
+			for (const a of this.accounts) {
+				if (a.email) accountEmails.add(a.email.toLowerCase());
+			}
+		}
+
+		let notesRendered = 0;
+
+		for (const cached of cachedMeetings) {
+			let participants = cached.participants;
+			if (accountEmails.size > 0) {
+				participants = participants.filter(
+					(p) => !p.email || !accountEmails.has(p.email.toLowerCase()),
+				);
+			}
+
+			const meetingData: MeetingData = {
+				id: cached.id,
+				title: cached.title,
+				date: cached.date,
+				startTime: cached.startTime,
+				created: cached.created,
+				url: cached.url,
+				folder: cached.folder,
+				participants,
+				privateNotes: cached.privateNotes,
+				enhancedNotes: cached.enhancedNotes,
+				transcript: "",
+			};
+
+			const meetingPathInfo = resolveNotePath(
+				folderPathPattern,
+				filenamePattern,
+				meetingData,
+			);
+			const transcriptPathInfo = resolveTranscriptPath(
+				transcriptFolderSetting,
+				transcriptFilenamePattern,
+				meetingData,
+				meetingPathInfo.folder,
+				meetingPathInfo.filename,
+			);
+
+			const existingTranscriptFile = existingTranscripts.get(cached.id);
+			const transcriptFilename = existingTranscriptFile
+				? existingTranscriptFile.basename
+				: transcriptPathInfo.filename;
+
+			const content = applyTemplate(template, meetingData, emailToNoteTitle, {
+				granola_meeting_transcript: transcriptFilename,
+			});
+
+			const existingFile = existingDocs.get(cached.id);
+			if (existingFile) {
+				await this.app.vault.modify(existingFile, content);
+			} else {
+				await this.ensureFolderExists(meetingPathInfo.folder);
+				const newFile = await this.app.vault.create(meetingPathInfo.path, content);
+				existingDocs.set(cached.id, newFile);
+			}
+			notesRendered++;
+		}
+
+		new Notice(
+			`Granola: Re-rendered ${notesRendered} note${notesRendered !== 1 ? "s" : ""} from cache`,
+		);
+		this.refreshSettingsTab();
+	}
+
+	async reRouteAllNotes(): Promise<void> {
+		const cachedMeetings = await this.cacheStore.listMeetings();
+		if (cachedMeetings.length === 0) {
+			new Notice("Granola: No cached meetings found. Run a sync first.");
+			return;
+		}
+
+		new Notice("Granola: Re-routing notes...");
+
+		const folderPathSetting = this.settings.folderPath || DEFAULT_SETTINGS.folderPath;
+		const filenamePattern = this.settings.filenamePattern || DEFAULT_SETTINGS.filenamePattern;
+		const folderPathPattern = normalizePath(folderPathSetting);
+		const folderBasePath = getFolderBasePath(folderPathPattern);
+
+		const { existingDocs } = this.indexVaultFiles(folderBasePath);
+
+		let movedCount = 0;
+		let inPlaceCount = 0;
+		let conflictCount = 0;
+
+		for (const cached of cachedMeetings) {
+			const existingFile = existingDocs.get(cached.id);
+			if (!existingFile) continue;
+
+			const meetingData: MeetingData = {
+				id: cached.id,
+				title: cached.title,
+				date: cached.date,
+				startTime: cached.startTime,
+				created: cached.created,
+				url: cached.url,
+				folder: cached.folder,
+				participants: cached.participants,
+				privateNotes: cached.privateNotes,
+				enhancedNotes: cached.enhancedNotes,
+				transcript: "",
+			};
+
+			const meetingPathInfo = resolveNotePath(
+				folderPathPattern,
+				filenamePattern,
+				meetingData,
+			);
+
+			if (existingFile.path === meetingPathInfo.path) {
+				inPlaceCount++;
+				continue;
+			}
+
+			const moved = await this.moveFileSafely(existingFile, meetingPathInfo.path);
+			if (moved) {
+				movedCount++;
+			} else {
+				conflictCount++;
+			}
+		}
+
+		let message = `Granola: Re-routed ${movedCount} note${movedCount !== 1 ? "s" : ""} (${inPlaceCount} already in place)`;
+		if (conflictCount > 0) {
+			message += ` (${conflictCount} conflicts skipped)`;
+		}
+		new Notice(message);
+	}
+
+	async reRenderAllTranscriptsFromCache(): Promise<void> {
+		const cachedMeetings = await this.cacheStore.listMeetings();
+		if (cachedMeetings.length === 0) {
+			new Notice("Granola: No cached meetings found. Run a sync first.");
+			return;
+		}
+
+		new Notice("Granola: Re-rendering transcripts from cache...");
+
+		const folderPathSetting = this.settings.folderPath || DEFAULT_SETTINGS.folderPath;
+		const filenamePattern = this.settings.filenamePattern || DEFAULT_SETTINGS.filenamePattern;
+
+		const transcriptFolderSetting =
+			this.settings.transcriptFolder || DEFAULT_SETTINGS.transcriptFolder;
+		const transcriptFilenamePattern =
+			this.settings.transcriptFilenamePattern || DEFAULT_SETTINGS.transcriptFilenamePattern;
+		const transcriptTemplatePath =
+			this.settings.transcriptTemplatePath || DEFAULT_SETTINGS.transcriptTemplatePath;
+
+		let transcriptTemplate = "";
+		try {
+			transcriptTemplate = await loadTemplate(
+				this.app,
+				transcriptTemplatePath,
+				DEFAULT_TRANSCRIPT_TEMPLATE,
+			);
+		} catch (error) {
+			const message = error instanceof Error ? error.message : "Unknown error";
+			new Notice(`Error loading transcript template: ${message}`);
+			return;
+		}
+
+		const folderPathPattern = normalizePath(folderPathSetting);
+		const folderBasePath = getFolderBasePath(folderPathPattern);
+
+		const { existingDocs, existingTranscripts, emailToNoteTitle } =
+			this.indexVaultFiles(folderBasePath);
+
+		const accountEmails = new Set<string>();
+		if (this.settings.excludeSelfFromAttendees) {
+			for (const a of this.accounts) {
+				if (a.email) accountEmails.add(a.email.toLowerCase());
+			}
+		}
+
+		let transcriptsRendered = 0;
+
+		for (const cached of cachedMeetings) {
+			const cachedTranscript = await this.cacheStore.getTranscript(cached.id);
+			if (!cachedTranscript) {
+				continue;
+			}
+
+			let participants = cached.participants;
+			if (accountEmails.size > 0) {
+				participants = participants.filter(
+					(p) => !p.email || !accountEmails.has(p.email.toLowerCase()),
+				);
+			}
+
+			const meetingData: MeetingData = {
+				id: cached.id,
+				title: cached.title,
+				date: cached.date,
+				startTime: cached.startTime,
+				created: cached.created,
+				url: cached.url,
+				folder: cached.folder,
+				participants,
+				privateNotes: cached.privateNotes,
+				enhancedNotes: cached.enhancedNotes,
+				transcript: cachedTranscript,
+			};
+
+			const meetingPathInfo = resolveNotePath(
+				folderPathPattern,
+				filenamePattern,
+				meetingData,
+			);
+			const transcriptPathInfo = resolveTranscriptPath(
+				transcriptFolderSetting,
+				transcriptFilenamePattern,
+				meetingData,
+				meetingPathInfo.folder,
+				meetingPathInfo.filename,
+			);
+
+			const existingNoteFile = existingDocs.get(cached.id);
+			const noteLinkName = existingNoteFile
+				? existingNoteFile.basename
+				: meetingPathInfo.filename;
+
+			const transcriptContent = applyTemplate(
+				transcriptTemplate,
+				meetingData,
+				emailToNoteTitle,
+				{
+					granola_meeting_note: noteLinkName,
+				},
+			);
+
+			const existingTranscriptFile = existingTranscripts.get(cached.id);
+			if (existingTranscriptFile) {
+				await this.app.vault.modify(existingTranscriptFile, transcriptContent);
+			} else {
+				await this.ensureFolderExists(transcriptPathInfo.folder);
+				const newTranscriptFile = await this.app.vault.create(
+					transcriptPathInfo.path,
+					transcriptContent,
+				);
+				existingTranscripts.set(cached.id, newTranscriptFile);
+			}
+			transcriptsRendered++;
+		}
+
+		new Notice(
+			`Granola: Re-rendered ${transcriptsRendered} transcript${transcriptsRendered !== 1 ? "s" : ""} from cache`,
+		);
+		this.refreshSettingsTab();
+	}
+
+	async reRouteAllTranscripts(): Promise<void> {
+		const cachedMeetings = await this.cacheStore.listMeetings();
+		if (cachedMeetings.length === 0) {
+			new Notice("Granola: No cached meetings found. Run a sync first.");
+			return;
+		}
+
+		new Notice("Granola: Re-routing transcripts...");
+
+		const folderPathSetting = this.settings.folderPath || DEFAULT_SETTINGS.folderPath;
+		const filenamePattern = this.settings.filenamePattern || DEFAULT_SETTINGS.filenamePattern;
+		const transcriptFolderSetting =
+			this.settings.transcriptFolder || DEFAULT_SETTINGS.transcriptFolder;
+		const transcriptFilenamePattern =
+			this.settings.transcriptFilenamePattern || DEFAULT_SETTINGS.transcriptFilenamePattern;
+
+		const folderPathPattern = normalizePath(folderPathSetting);
+		const folderBasePath = getFolderBasePath(folderPathPattern);
+
+		const { existingTranscripts } = this.indexVaultFiles(folderBasePath);
+
+		let movedCount = 0;
+		let inPlaceCount = 0;
+		let conflictCount = 0;
+
+		for (const cached of cachedMeetings) {
+			const existingFile = existingTranscripts.get(cached.id);
+			if (!existingFile) continue;
+
+			const meetingData: MeetingData = {
+				id: cached.id,
+				title: cached.title,
+				date: cached.date,
+				startTime: cached.startTime,
+				created: cached.created,
+				url: cached.url,
+				folder: cached.folder,
+				participants: cached.participants,
+				privateNotes: cached.privateNotes,
+				enhancedNotes: cached.enhancedNotes,
+				transcript: "",
+			};
+
+			const meetingPathInfo = resolveNotePath(
+				folderPathPattern,
+				filenamePattern,
+				meetingData,
+			);
+			const transcriptPathInfo = resolveTranscriptPath(
+				transcriptFolderSetting,
+				transcriptFilenamePattern,
+				meetingData,
+				meetingPathInfo.folder,
+				meetingPathInfo.filename,
+			);
+
+			if (existingFile.path === transcriptPathInfo.path) {
+				inPlaceCount++;
+				continue;
+			}
+
+			const moved = await this.moveFileSafely(existingFile, transcriptPathInfo.path);
+			if (moved) {
+				movedCount++;
+			} else {
+				conflictCount++;
+			}
+		}
+
+		let message = `Granola: Re-routed ${movedCount} transcript${movedCount !== 1 ? "s" : ""} (${inPlaceCount} already in place)`;
+		if (conflictCount > 0) {
+			message += ` (${conflictCount} conflicts skipped)`;
+		}
+		new Notice(message);
+	}
+
+	async clearCache(): Promise<void> {
+		await this.cacheStore.clear();
+		new Notice("Granola: Local cache cleared");
+		this.refreshSettingsTab();
+	}
+
+	private indexVaultFiles(folderBasePath: string): {
+		existingDocs: Map<string, TFile>;
+		existingTranscripts: Map<string, TFile>;
+		emailToNoteTitle: Map<string, string>;
+	} {
 		const existingDocs = new Map<string, TFile>();
 		const existingTranscripts = new Map<string, TFile>();
 		const files = this.app.vault.getMarkdownFiles();
@@ -750,104 +1076,28 @@ export default class GranolaSyncPlugin extends Plugin {
 			}
 		}
 
-		const accountEmails = new Set<string>();
-		if (this.settings.excludeSelfFromAttendees) {
-			for (const a of this.accounts) {
-				if (a.email) accountEmails.add(a.email.toLowerCase());
-			}
-		}
-
-		let notesRendered = 0;
-		let transcriptsRendered = 0;
-
-		for (const cached of cachedMeetings) {
-			let participants = cached.participants;
-			if (accountEmails.size > 0) {
-				participants = participants.filter(
-					(p) => !p.email || !accountEmails.has(p.email.toLowerCase()),
-				);
-			}
-
-			const meetingData: MeetingData = {
-				id: cached.id,
-				title: cached.title,
-				date: cached.date,
-				startTime: cached.startTime,
-				created: cached.created,
-				url: cached.url,
-				folder: cached.folder,
-				participants,
-				privateNotes: cached.privateNotes,
-				enhancedNotes: cached.enhancedNotes,
-				transcript: "",
-			};
-
-			const meetingPathInfo = resolveNotePath(
-				folderPathPattern,
-				filenamePattern,
-				meetingData,
-			);
-			const transcriptPathInfo = resolveTranscriptPath(
-				transcriptFolderSetting,
-				transcriptFilenamePattern,
-				meetingData,
-				meetingPathInfo.folder,
-				meetingPathInfo.filename,
-			);
-
-			const content = applyTemplate(template, meetingData, emailToNoteTitle, {
-				granola_meeting_transcript: transcriptPathInfo.filename,
-			});
-
-			await this.ensureFolderExists(meetingPathInfo.folder);
-			const existingFile = existingDocs.get(cached.id);
-			if (existingFile) {
-				await this.app.vault.modify(existingFile, content);
-			} else {
-				const newFile = await this.app.vault.create(meetingPathInfo.path, content);
-				existingDocs.set(cached.id, newFile);
-			}
-			notesRendered++;
-
-			if (this.settings.syncTranscripts) {
-				const cachedTranscript = await this.cacheStore.getTranscript(cached.id);
-				if (cachedTranscript) {
-					meetingData.transcript = cachedTranscript;
-					const transcriptContent = applyTemplate(
-						transcriptTemplate,
-						meetingData,
-						emailToNoteTitle,
-						{
-							granola_meeting_note: meetingPathInfo.filename,
-						},
-					);
-
-					await this.ensureFolderExists(transcriptPathInfo.folder);
-					const existingTranscriptFile = existingTranscripts.get(cached.id);
-					if (existingTranscriptFile) {
-						await this.app.vault.modify(existingTranscriptFile, transcriptContent);
-					} else {
-						const newTranscriptFile = await this.app.vault.create(
-							transcriptPathInfo.path,
-							transcriptContent,
-						);
-						existingTranscripts.set(cached.id, newTranscriptFile);
-					}
-					transcriptsRendered++;
-				}
-			}
-		}
-
-		new Notice(
-			`Granola: Re-rendered ${notesRendered} notes and ${transcriptsRendered} transcripts from cache`,
-		);
-		this.refreshSettingsTab();
+		return { existingDocs, existingTranscripts, emailToNoteTitle };
 	}
 
-	async clearCache(): Promise<void> {
-		await this.cacheStore.clear();
-		new Notice("Granola: Local cache cleared");
-		this.refreshSettingsTab();
+	private async moveFileSafely(file: TFile, targetPath: string): Promise<boolean> {
+		const normalizedTarget = normalizePath(targetPath);
+		if (file.path === normalizedTarget) {
+			return false;
+		}
+		const existing = this.app.vault.getAbstractFileByPath(normalizedTarget);
+		if (existing && existing.path !== file.path) {
+			console.warn(
+				`Granola: cannot move ${file.path} to ${normalizedTarget} - file already exists at target path`,
+			);
+			return false;
+		}
+		const folderIndex = normalizedTarget.lastIndexOf("/");
+		if (folderIndex > 0) {
+			const folder = normalizedTarget.substring(0, folderIndex);
+			await this.ensureFolderExists(folder);
+		}
+		await this.app.fileManager.renameFile(file, normalizedTarget);
+		return true;
 	}
 
 	/**
@@ -936,10 +1186,9 @@ export default class GranolaSyncPlugin extends Plugin {
 
 		// Determine which meetings need note creation/update
 		const meetingsToSyncNotes = listedMeetings.filter((m) => {
-			if (this.settings.skipExistingNotes && ctx.existingDocs.has(m.id)) {
-				return false;
-			}
-			return true;
+			const hasInVault = ctx.existingDocs.has(m.id);
+			if (!hasInVault) return true;
+			return this.settings.updateNoteContent || this.settings.rerouteExistingNotes;
 		});
 
 		// Determine which meetings need transcripts (cache is the source of truth for downloads)
@@ -949,6 +1198,11 @@ export default class GranolaSyncPlugin extends Plugin {
 				const hasInCache = await this.cacheStore.hasTranscript(m.id);
 				const hasInVault = ctx.existingTranscripts.has(m.id);
 				if (!hasInCache || !hasInVault) {
+					meetingsToSyncTranscripts.push(m);
+				} else if (
+					this.settings.updateTranscriptContent ||
+					this.settings.rerouteExistingTranscripts
+				) {
 					meetingsToSyncTranscripts.push(m);
 				}
 			}
@@ -1061,13 +1315,28 @@ export default class GranolaSyncPlugin extends Plugin {
 					meetingPathInfo.filename,
 				);
 
+				const existingTranscriptFile = ctx.existingTranscripts.get(details.id);
+				const transcriptLinkName = existingTranscriptFile
+					? existingTranscriptFile.basename
+					: transcriptPathInfo.filename;
+
 				const content = applyTemplate(ctx.template, meetingData, ctx.emailToNoteTitle, {
-					granola_meeting_transcript: transcriptPathInfo.filename,
+					granola_meeting_transcript: transcriptLinkName,
 				});
 
 				if (existingFile) {
-					await this.app.vault.modify(existingFile, content);
-					updated++;
+					let wasModified = false;
+					if (this.settings.rerouteExistingNotes) {
+						const moved = await this.moveFileSafely(existingFile, meetingPathInfo.path);
+						if (moved) wasModified = true;
+					}
+					if (this.settings.updateNoteContent) {
+						await this.app.vault.modify(existingFile, content);
+						wasModified = true;
+					}
+					if (wasModified) {
+						updated++;
+					}
 				} else {
 					await this.ensureFolderExists(meetingPathInfo.folder);
 					const newFile = await this.app.vault.create(meetingPathInfo.path, content);
@@ -1163,27 +1432,46 @@ export default class GranolaSyncPlugin extends Plugin {
 						meetingPathInfo.filename,
 					);
 
+					const existingNoteFile = ctx.existingDocs.get(m.id);
+					const noteLinkName = existingNoteFile
+						? existingNoteFile.basename
+						: meetingPathInfo.filename;
+
 					const transcriptContent = applyTemplate(
 						ctx.transcriptTemplate,
 						meetingData,
 						ctx.emailToNoteTitle,
 						{
-							granola_meeting_note: meetingPathInfo.filename,
+							granola_meeting_note: noteLinkName,
 						},
 					);
 
 					await this.ensureFolderExists(transcriptPathInfo.folder);
 					const existingTranscriptFile = ctx.existingTranscripts.get(m.id);
 					if (existingTranscriptFile) {
-						await this.app.vault.modify(existingTranscriptFile, transcriptContent);
+						let wasModified = false;
+						if (this.settings.rerouteExistingTranscripts) {
+							const moved = await this.moveFileSafely(
+								existingTranscriptFile,
+								transcriptPathInfo.path,
+							);
+							if (moved) wasModified = true;
+						}
+						if (this.settings.updateTranscriptContent) {
+							await this.app.vault.modify(existingTranscriptFile, transcriptContent);
+							wasModified = true;
+						}
+						if (wasModified) {
+							transcriptsCreated++;
+						}
 					} else {
 						const newTranscriptFile = await this.app.vault.create(
 							transcriptPathInfo.path,
 							transcriptContent,
 						);
 						ctx.existingTranscripts.set(m.id, newTranscriptFile);
+						transcriptsCreated++;
 					}
-					transcriptsCreated++;
 				} catch (error) {
 					if (this.isAbortError(error)) throw error;
 					console.error(`Error saving transcript note ${m.id}:`, error);

@@ -1,4 +1,4 @@
-import { App, ButtonComponent, PluginSettingTab } from "obsidian";
+import { App, ButtonComponent, PluginSettingTab, Setting } from "obsidian";
 import type { SettingDefinitionItem, SettingGroupItem } from "obsidian";
 import type GranolaSyncPlugin from "./main";
 import type { GranolaAccount } from "./main";
@@ -38,38 +38,75 @@ const SYNC_TIME_RANGE_OPTIONS: Record<SyncTimeRange, string> = {
 };
 
 export interface GranolaSyncSettings {
+	// Sync
+	syncTimeRange: SyncTimeRange;
+	onlyMyMeetings: boolean;
+	syncFrequency: SyncFrequency;
+	showRibbonIcon: boolean;
+
+	// Attendees (Shared)
+	excludeSelfFromAttendees: boolean;
+	matchAttendeesByEmail: boolean;
+
+	// Notes
 	folderPath: string;
 	filenamePattern: string;
 	templatePath: string;
-	syncFrequency: SyncFrequency;
-	showRibbonIcon: boolean;
-	skipExistingNotes: boolean;
-	matchAttendeesByEmail: boolean;
-	excludeSelfFromAttendees: boolean;
-	syncTimeRange: SyncTimeRange;
+	updateNoteContent: boolean;
+	rerouteExistingNotes: boolean;
+
+	// Transcripts
 	syncTranscripts: boolean;
-	onlyMyMeetings: boolean;
 	transcriptFolder: string;
 	transcriptFilenamePattern: string;
 	transcriptTemplatePath: string;
+	updateTranscriptContent: boolean;
+	rerouteExistingTranscripts: boolean;
+
+	// Legacy backwards-compatibility
+	skipExistingNotes?: boolean;
 }
 
 export const DEFAULT_SETTINGS: GranolaSyncSettings = {
+	syncTimeRange: "last_30_days",
+	onlyMyMeetings: true,
+	syncFrequency: "15m",
+	showRibbonIcon: true,
+
+	excludeSelfFromAttendees: true,
+	matchAttendeesByEmail: true,
+
 	folderPath: "Meetings",
 	filenamePattern: "{date} {title}",
 	templatePath: "Templates/Granola.md",
-	syncFrequency: "15m",
-	showRibbonIcon: true,
-	skipExistingNotes: true,
-	matchAttendeesByEmail: true,
-	excludeSelfFromAttendees: true,
-	syncTimeRange: "last_30_days",
+	updateNoteContent: true,
+	rerouteExistingNotes: false,
+
 	syncTranscripts: false,
-	onlyMyMeetings: true,
 	transcriptFolder: "{meeting_folder}/Transcripts",
 	transcriptFilenamePattern: "{filename} (Transcript)",
 	transcriptTemplatePath: "Templates/Granola Transcript.md",
+	updateTranscriptContent: true,
+	rerouteExistingTranscripts: false,
 };
+
+/**
+ * Migrate legacy settings to current format while preserving user configuration.
+ */
+export function migrateSettings(raw: Partial<GranolaSyncSettings>): GranolaSyncSettings {
+	const settings: GranolaSyncSettings = { ...DEFAULT_SETTINGS, ...raw };
+
+	if (raw.updateNoteContent === undefined && raw.skipExistingNotes !== undefined) {
+		settings.updateNoteContent = !raw.skipExistingNotes;
+		settings.rerouteExistingNotes = false;
+	}
+	if (raw.updateTranscriptContent === undefined && raw.skipExistingNotes !== undefined) {
+		settings.updateTranscriptContent = !raw.skipExistingNotes;
+		settings.rerouteExistingTranscripts = false;
+	}
+
+	return settings;
+}
 
 type SettingKey = keyof GranolaSyncSettings;
 
@@ -96,7 +133,14 @@ export class GranolaSyncSettingTab extends PluginSettingTab {
 	}
 
 	override getSettingDefinitions(): SettingDefinitionItem<SettingKey>[] {
-		return [this.accountsList(), this.syncGroup(), this.cacheGroup(), this.notesGroup()];
+		return [
+			this.accountsList(),
+			this.syncGroup(),
+			this.cacheGroup(),
+			this.attendeesGroup(),
+			this.notesGroup(),
+			this.transcriptsGroup(),
+		];
 	}
 
 	/**
@@ -140,7 +184,7 @@ export class GranolaSyncSettingTab extends PluginSettingTab {
 					button
 						.setButtonText("Connect to Granola")
 						.setCta()
-						.onClick(() => void this.plugin.addAccount())
+						.onClick(() => void this.plugin.addAccount()),
 				);
 			},
 		};
@@ -154,8 +198,6 @@ export class GranolaSyncSettingTab extends PluginSettingTab {
 				: account.label
 					? "Connected and ready to sync."
 					: "Connected. (Account name unavailable.)",
-			// The row's name is the account label, so search needs the words a
-			// user would actually type to find it.
 			aliases: ["granola account", "disconnect", "reconnect", "sign out"],
 			render: (setting) => {
 				if (account.needsReauth) {
@@ -163,7 +205,7 @@ export class GranolaSyncSettingTab extends PluginSettingTab {
 						button
 							.setButtonText("Reconnect")
 							.setCta()
-							.onClick(() => void this.plugin.reconnectAccount(account.id))
+							.onClick(() => void this.plugin.reconnectAccount(account.id)),
 					);
 				}
 
@@ -174,7 +216,7 @@ export class GranolaSyncSettingTab extends PluginSettingTab {
 						.onClick(async () => {
 							await this.plugin.disconnectAccount(account.id);
 							this.update();
-						})
+						}),
 				);
 			},
 		};
@@ -211,7 +253,9 @@ export class GranolaSyncSettingTab extends PluginSettingTab {
 							const isSyncing = this.plugin.isSyncActive || state.phase !== "idle";
 
 							if (isSyncing) {
-								actionButton.setButtonText(state.phase === "stopping" ? "Stopping..." : "Stop sync");
+								actionButton.setButtonText(
+									state.phase === "stopping" ? "Stopping..." : "Stop sync",
+								);
 								actionButton.buttonEl.classList.remove("mod-cta");
 								actionButton.setDestructive();
 								actionButton.setDisabled(state.phase === "stopping");
@@ -219,7 +263,10 @@ export class GranolaSyncSettingTab extends PluginSettingTab {
 								statusRow.setText(formatProgressMessage(state));
 								statusRow.show();
 
-								if (state.total > 0 && (state.phase === "meetings" || state.phase === "transcripts")) {
+								if (
+									state.total > 0 &&
+									(state.phase === "meetings" || state.phase === "transcripts")
+								) {
 									progressBar.max = state.total;
 									progressBar.value = state.current;
 									progressBar.show();
@@ -270,16 +317,6 @@ export class GranolaSyncSettingTab extends PluginSettingTab {
 					},
 				},
 				{
-					name: "Sync frequency",
-					desc: "How often to automatically sync meetings from Granola",
-					control: {
-						type: "dropdown",
-						key: "syncFrequency",
-						options: SYNC_FREQUENCY_OPTIONS,
-						defaultValue: DEFAULT_SETTINGS.syncFrequency,
-					},
-				},
-				{
 					name: "Only my meetings",
 					desc: "Sync only meetings you recorded or were listed as a participant in, including notes shared with you. Disable to also sync every workspace-visible meeting.",
 					control: {
@@ -289,45 +326,40 @@ export class GranolaSyncSettingTab extends PluginSettingTab {
 					},
 				},
 				{
-					name: "Sync transcripts",
-					desc: "Include full meeting transcripts saved as separate linked documents. Each transcript requires a paced API call (~65s spacing).",
-					control: {
-						type: "toggle",
-						key: "syncTranscripts",
-						defaultValue: DEFAULT_SETTINGS.syncTranscripts,
-					},
-				},
-				{
-					name: "Transcript folder",
-					desc: "Where to save transcript notes. Supports {meeting_folder}, {date}, {granolaFolder}. Default saves in a Transcripts/ subfolder alongside the meeting note.",
-					control: {
-						type: "text",
-						key: "transcriptFolder",
-						placeholder: DEFAULT_SETTINGS.transcriptFolder,
-						defaultValue: DEFAULT_SETTINGS.transcriptFolder,
-					},
-				},
-				{
-					name: "Transcript filename pattern",
-					desc: "Pattern for transcript note filenames. Supports {filename}, {meeting_filename}, {title}, {date}, {id}.",
-					control: {
-						type: "text",
-						key: "transcriptFilenamePattern",
-						placeholder: DEFAULT_SETTINGS.transcriptFilenamePattern,
-						defaultValue: DEFAULT_SETTINGS.transcriptFilenamePattern,
-						validate: (value) =>
-							value.trim() ? undefined : "Enter a pattern — transcripts need a filename.",
-					},
-				},
-				{
-					name: "Transcript template path",
-					desc: "Path to transcript template file in your vault.",
-					control: {
-						type: "file",
-						key: "transcriptTemplatePath",
-						placeholder: DEFAULT_SETTINGS.transcriptTemplatePath,
-						defaultValue: DEFAULT_SETTINGS.transcriptTemplatePath,
-						filter: (file) => file.extension === "md",
+					name: "Advanced sync options",
+					desc: "Schedule and UI display settings",
+					render: (setting) => {
+						setting.infoEl.remove();
+						const details = setting.settingEl.createEl("details", {
+							cls: "granola-collapsible-details",
+						});
+						details.createEl("summary", {
+							text: "Advanced sync options",
+							cls: "granola-collapsible-summary",
+						});
+
+						new Setting(details)
+							.setName("Sync frequency")
+							.setDesc("How often to automatically sync meetings from Granola")
+							.addDropdown((dropdown) => {
+								for (const [key, label] of Object.entries(SYNC_FREQUENCY_OPTIONS)) {
+									dropdown.addOption(key, label);
+								}
+								dropdown.setValue(this.plugin.settings.syncFrequency);
+								dropdown.onChange(async (val) => {
+									await this.setControlValue("syncFrequency", val);
+								});
+							});
+
+						new Setting(details)
+							.setName("Show ribbon icon")
+							.setDesc("Show a sync button in the left ribbon")
+							.addToggle((toggle) => {
+								toggle.setValue(this.plugin.settings.showRibbonIcon);
+								toggle.onChange(async (val) => {
+									await this.setControlValue("showRibbonIcon", val);
+								});
+							});
 					},
 				},
 			],
@@ -337,29 +369,8 @@ export class GranolaSyncSettingTab extends PluginSettingTab {
 	private cacheGroup(): SettingDefinitionItem<SettingKey> {
 		return {
 			type: "group",
-			heading: "Cache & Re-rendering",
+			heading: "Cache",
 			items: [
-				{
-					name: "Re-render notes from cache",
-					desc: "Regenerate all vault notes from the local cache using current templates and folder patterns, without fetching from Granola.",
-					render: (setting) => {
-						setting.addButton((button) =>
-							button
-								.setButtonText("Re-render notes")
-								.setCta()
-								.onClick(async () => {
-									button.setDisabled(true);
-									button.setButtonText("Re-rendering...");
-									try {
-										await this.plugin.reRenderAllNotesFromCache();
-									} finally {
-										button.setDisabled(false);
-										button.setButtonText("Re-render notes");
-									}
-								}),
-						);
-					},
-				},
 				{
 					name: "Local cache status",
 					desc: "Raw meetings and transcripts cached on disk.",
@@ -416,6 +427,33 @@ export class GranolaSyncSettingTab extends PluginSettingTab {
 		};
 	}
 
+	private attendeesGroup(): SettingDefinitionItem<SettingKey> {
+		return {
+			type: "group",
+			heading: "Attendees",
+			items: [
+				{
+					name: "Exclude yourself from attendees",
+					desc: "Leave your own Granola account out of the attendee list, since you are listed on every meeting you take part in.",
+					control: {
+						type: "toggle",
+						key: "excludeSelfFromAttendees",
+						defaultValue: DEFAULT_SETTINGS.excludeSelfFromAttendees,
+					},
+				},
+				{
+					name: "Match attendees by email",
+					desc: "Link attendees to existing notes that have a matching email in their 'emails' frontmatter property.",
+					control: {
+						type: "toggle",
+						key: "matchAttendeesByEmail",
+						defaultValue: DEFAULT_SETTINGS.matchAttendeesByEmail,
+					},
+				},
+			],
+		};
+	}
+
 	private notesGroup(): SettingDefinitionItem<SettingKey> {
 		return {
 			type: "group",
@@ -424,8 +462,6 @@ export class GranolaSyncSettingTab extends PluginSettingTab {
 				{
 					name: "Folder path",
 					desc: "Where to save meeting notes. Supports {granolaFolder}, {date}, {date:YYYY/MM}, {title}, {id}.",
-					// Plain text rather than a folder suggester: the value is a pattern,
-					// and date tokens name folders that don't exist yet.
 					control: {
 						type: "text",
 						key: "folderPath",
@@ -448,10 +484,6 @@ export class GranolaSyncSettingTab extends PluginSettingTab {
 				{
 					name: "Template path",
 					desc: "Path to template file in your vault. A default one is created when the plugin is first enabled.",
-					// A picker, so it can only choose files that already exist — which
-					// is why the plugin writes the default template on enable rather
-					// than waiting for the first sync. To start a new template from
-					// the default, duplicate that file in the vault and pick the copy.
 					control: {
 						type: "file",
 						key: "templatePath",
@@ -461,39 +493,160 @@ export class GranolaSyncSettingTab extends PluginSettingTab {
 					},
 				},
 				{
-					name: "Show ribbon icon",
-					desc: "Show a sync button in the left ribbon",
+					name: "Update note content on sync",
+					desc: "When enabled, re-renders and updates existing notes in your vault with fresh summary and private notes from Granola. Disable to preserve manual note edits.",
 					control: {
 						type: "toggle",
-						key: "showRibbonIcon",
-						defaultValue: DEFAULT_SETTINGS.showRibbonIcon,
+						key: "updateNoteContent",
+						defaultValue: DEFAULT_SETTINGS.updateNoteContent,
 					},
 				},
 				{
-					name: "Skip existing notes",
-					desc: "When enabled, existing notes won't be overwritten. Disable to update notes when Granola data changes. Existing notes are matched by `granola_id` anywhere in your vault, not just the sync folder.",
+					name: "Re-route notes on sync",
+					desc: "When enabled, moves and renames existing notes if their folder or filename differs from the current pattern. Disable if you manually move notes into custom folders.",
 					control: {
 						type: "toggle",
-						key: "skipExistingNotes",
-						defaultValue: DEFAULT_SETTINGS.skipExistingNotes,
+						key: "rerouteExistingNotes",
+						defaultValue: DEFAULT_SETTINGS.rerouteExistingNotes,
 					},
 				},
 				{
-					name: "Exclude yourself from attendees",
-					desc: "Leave your own Granola account out of the attendee list, since you are listed on every meeting you take part in.",
+					name: "Manual note actions",
+					desc: "Re-render content or re-route existing meeting notes in your vault from cached data.",
+					render: (setting) => {
+						setting.addButton((button) =>
+							button
+								.setButtonText("Re-render notes")
+								.setCta()
+								.onClick(async () => {
+									button.setDisabled(true);
+									button.setButtonText("Re-rendering...");
+									try {
+										await this.plugin.reRenderAllNotesFromCache();
+									} finally {
+										button.setDisabled(false);
+										button.setButtonText("Re-render notes");
+									}
+								}),
+						);
+						setting.addButton((button) =>
+							button
+								.setButtonText("Re-route notes")
+								.onClick(async () => {
+									button.setDisabled(true);
+									button.setButtonText("Re-routing...");
+									try {
+										await this.plugin.reRouteAllNotes();
+									} finally {
+										button.setDisabled(false);
+										button.setButtonText("Re-route notes");
+									}
+								}),
+						);
+					},
+				},
+			],
+		};
+	}
+
+	private transcriptsGroup(): SettingDefinitionItem<SettingKey> {
+		return {
+			type: "group",
+			heading: "Transcripts",
+			items: [
+				{
+					name: "Sync transcripts",
+					desc: "Include full meeting transcripts saved as separate linked documents. Each transcript requires a paced API call (~65s spacing).",
 					control: {
 						type: "toggle",
-						key: "excludeSelfFromAttendees",
-						defaultValue: DEFAULT_SETTINGS.excludeSelfFromAttendees,
+						key: "syncTranscripts",
+						defaultValue: DEFAULT_SETTINGS.syncTranscripts,
 					},
 				},
 				{
-					name: "Match attendees by email",
-					desc: "Link attendees to existing notes that have a matching email in their 'emails' frontmatter property.",
+					name: "Transcript folder",
+					desc: "Where to save transcript notes. Supports {meeting_folder}, {date}, {granolaFolder}. Default saves in a Transcripts/ subfolder alongside the meeting note.",
+					control: {
+						type: "text",
+						key: "transcriptFolder",
+						placeholder: DEFAULT_SETTINGS.transcriptFolder,
+						defaultValue: DEFAULT_SETTINGS.transcriptFolder,
+					},
+				},
+				{
+					name: "Transcript filename pattern",
+					desc: "Pattern for transcript note filenames. Supports {filename}, {meeting_filename}, {title}, {date}, {id}.",
+					control: {
+						type: "text",
+						key: "transcriptFilenamePattern",
+						placeholder: DEFAULT_SETTINGS.transcriptFilenamePattern,
+						defaultValue: DEFAULT_SETTINGS.transcriptFilenamePattern,
+						validate: (value) =>
+							value.trim() ? undefined : "Enter a pattern — transcripts need a filename.",
+					},
+				},
+				{
+					name: "Transcript template path",
+					desc: "Path to transcript template file in your vault.",
+					control: {
+						type: "file",
+						key: "transcriptTemplatePath",
+						placeholder: DEFAULT_SETTINGS.transcriptTemplatePath,
+						defaultValue: DEFAULT_SETTINGS.transcriptTemplatePath,
+						filter: (file) => file.extension === "md",
+					},
+				},
+				{
+					name: "Update transcript content on sync",
+					desc: "When enabled, re-renders existing transcript files in your vault using current templates and cached data.",
 					control: {
 						type: "toggle",
-						key: "matchAttendeesByEmail",
-						defaultValue: DEFAULT_SETTINGS.matchAttendeesByEmail,
+						key: "updateTranscriptContent",
+						defaultValue: DEFAULT_SETTINGS.updateTranscriptContent,
+					},
+				},
+				{
+					name: "Re-route transcripts on sync",
+					desc: "When enabled, moves and renames existing transcript files if their folder or filename differs from the current pattern.",
+					control: {
+						type: "toggle",
+						key: "rerouteExistingTranscripts",
+						defaultValue: DEFAULT_SETTINGS.rerouteExistingTranscripts,
+					},
+				},
+				{
+					name: "Manual transcript actions",
+					desc: "Re-render content or re-route existing transcript notes in your vault from cached data.",
+					render: (setting) => {
+						setting.addButton((button) =>
+							button
+								.setButtonText("Re-render transcripts")
+								.setCta()
+								.onClick(async () => {
+									button.setDisabled(true);
+									button.setButtonText("Re-rendering...");
+									try {
+										await this.plugin.reRenderAllTranscriptsFromCache();
+									} finally {
+										button.setDisabled(false);
+										button.setButtonText("Re-render transcripts");
+									}
+								}),
+						);
+						setting.addButton((button) =>
+							button
+								.setButtonText("Re-route transcripts")
+								.onClick(async () => {
+									button.setDisabled(true);
+									button.setButtonText("Re-routing...");
+									try {
+										await this.plugin.reRouteAllTranscripts();
+									} finally {
+										button.setDisabled(false);
+										button.setButtonText("Re-route transcripts");
+									}
+								}),
+						);
 					},
 				},
 			],
