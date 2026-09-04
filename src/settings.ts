@@ -91,7 +91,7 @@ export class GranolaSyncSettingTab extends PluginSettingTab {
 	}
 
 	override getSettingDefinitions(): SettingDefinitionItem<SettingKey>[] {
-		return [this.accountsList(), this.syncGroup(), this.notesGroup()];
+		return [this.accountsList(), this.syncGroup(), this.cacheGroup(), this.notesGroup()];
 	}
 
 	/**
@@ -323,6 +323,73 @@ export class GranolaSyncSettingTab extends PluginSettingTab {
 						placeholder: DEFAULT_SETTINGS.transcriptTemplatePath,
 						defaultValue: DEFAULT_SETTINGS.transcriptTemplatePath,
 						filter: (file) => file.extension === "md",
+					},
+				},
+			],
+		};
+	}
+
+	private cacheGroup(): SettingDefinitionItem<SettingKey> {
+		return {
+			type: "group",
+			heading: "Cache & Re-rendering",
+			items: [
+				{
+					name: "Re-render notes from cache",
+					desc: "Regenerate all vault notes from the local cache using current templates and folder patterns, without fetching from Granola.",
+					render: (setting) => {
+						setting.addButton((button) =>
+							button
+								.setButtonText("Re-render notes")
+								.setCta()
+								.onClick(async () => {
+									button.setDisabled(true);
+									button.setButtonText("Re-rendering...");
+									try {
+										await this.plugin.reRenderAllNotesFromCache();
+									} finally {
+										button.setDisabled(false);
+										button.setButtonText("Re-render notes");
+									}
+								}),
+						);
+					},
+				},
+				{
+					name: "Local cache status",
+					desc: "Raw meetings and transcripts cached on disk.",
+					render: (setting) => {
+						const statusEl = setting.controlEl.createSpan({
+							cls: "granola-cache-status-text",
+						});
+						statusEl.setText("Loading cache status...");
+						void this.plugin.cacheStore.getStats().then((stats) => {
+							statusEl.setText(
+								`${stats.meetingCount} meeting${stats.meetingCount !== 1 ? "s" : ""}, ${stats.transcriptCount} transcript${stats.transcriptCount !== 1 ? "s" : ""}`,
+							);
+						});
+					},
+				},
+				{
+					name: "Clear local cache",
+					desc: "Delete all locally cached meetings and transcripts. Future syncs will re-download them from Granola.",
+					render: (setting) => {
+						setting.addButton((button) =>
+							button
+								.setButtonText("Clear cache")
+								.setDestructive()
+								.onClick(async () => {
+									button.setDisabled(true);
+									button.setButtonText("Clearing...");
+									try {
+										await this.plugin.clearCache();
+										this.update();
+									} finally {
+										button.setDisabled(false);
+										button.setButtonText("Clear cache");
+									}
+								}),
+						);
 					},
 				},
 			],

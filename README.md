@@ -9,6 +9,8 @@ This plugin uses [Granola's official MCP API](https://docs.granola.ai/help-cente
 - **Official API**: Uses Granola's MCP API with OAuth authentication
 - **Multiple accounts**: Connect more than one Granola account and sync them all into the same vault
 - **Auto-sync**: Automatically sync meetings at configurable intervals (1m to 12h)
+- **Local JSON Cache**: Stores raw meeting metadata and transcripts in separate files (`cache/meetings/` and `cache/transcripts/`), protecting against data loss and rate limits
+- **Instant Re-rendering**: Re-render all your notes and transcripts in under a second when templates or folder routing change, without making any network calls
 - **Standalone Transcripts**: Decouples full transcripts into separate documents (`type: transcript`) bidirectionally linked with meeting notes (`type: meeting`), keeping notes lightweight and preventing transcript API calls from blocking note creation
 - **Live Progress & Interruption**: Real-time sync progress with item counts, transcript pacing countdown, status bar indicator, and a "Stop sync" button
 - **Custom Path Routing**: Route notes and transcripts using `{granolaFolder}`, `{meeting_date}`, `{meeting_name}`, and `{id}`. Transcripts can be saved side-by-side or in custom subfolders
@@ -53,12 +55,21 @@ To sync more than one Granola account, click **Add Granola account** in settings
 
 ![Settings screenshot](docs/options-screenshot.png)
 
+### Sync & Cache Settings
+
 | Setting | Default | Description |
 |---------|---------|-------------|
 | Time range | Last 30 days | How far back to look for meetings. Options: This week, Last week, Last 30 days, Last 90 days, Last 180 days, Last 1 year, All time. (Note: Granola Free plans restrict history to 30 days) |
 | Sync frequency | Every 15 minutes | How often to sync. Options: Manual only, On startup, 1m, 15m, 30m, 60m, 12h |
 | Only my meetings | On | Sync only meetings you recorded or were listed as a participant in, including notes shared with you. Turn off to also sync every workspace-visible meeting |
 | Sync transcripts | Off | Download full transcripts as standalone documents. Transcripts are fetched in Phase 2 with a 65s pacing delay between calls to comply with Granola rate limits |
+| Re-render notes from cache | — | Button to instantly regenerate all vault notes from local disk cache using current templates and folder patterns without contacting Granola |
+| Clear local cache | — | Button to purge the local raw JSON cache |
+
+### Notes & Routing Settings
+
+| Setting | Default | Description |
+|---------|---------|-------------|
 | Folder path | `Meetings` | Where to save meeting notes. Supports `{granolaFolder}` / `{folder}`, `{meeting_date}` / `{date}`, `{meeting_name}` / `{title}`, `{id}` |
 | Filename pattern | `{date} {title}` | Pattern for meeting note filenames. Supports `{date}`, `{date:YYYY-MM-DD}`, `{title}`, `{id}`, `{granolaFolder}` |
 | Template path | `Templates/Granola.md` | Path to your meeting note template file |
@@ -74,11 +85,28 @@ To sync more than one Granola account, click **Add Granola account** in settings
 
 1. **Triggering a sync**: By default your meetings sync automatically at your chosen frequency. You can also manually trigger a sync by clicking the ribbon icon, running the "Sync meetings" command from the palette, or clicking "Sync now" in plugin settings.
 2. **Real-time Progress & Status Bar**: During a sync, the settings page displays an active progress bar with step-by-step status messages (e.g. `Syncing meetings (3/15)...`, `Next transcript in 42s (2/5)...`). The Obsidian status bar also displays live sync counts and countdowns.
-3. **Interrupting a Sync**: If you need to stop a long-running sync (such as when downloading many transcripts), click the **Stop sync** button in settings. The plugin gracefully aborts network requests and stops the pacing loop immediately.
+3. **Interrupting a Sync**: If you need to stop a long-running sync (such as when downloading many transcripts), click the **Stop sync** button in settings. The plugin gracefully aborts network requests and stops the pacing loop immediately. All meetings and transcripts downloaded up to that point are safely preserved in the local cache.
+4. **Re-rendering from Cache**: Whenever you tweak your template, change frontmatter fields, or update your folder routing, you don't need to make any network calls or risk hitting API rate limits. Click **Re-render notes** in settings (or run "Granola Meetings Simple Sync: Re-render notes from cache" from the command palette). All notes and transcripts regenerate in milliseconds from local disk cache!
 
-## Template Variables & Decoupled Architecture
+## Two-Stage Architecture & Decoupled Transcripts
 
-Transcripts are stored in separate documents rather than embedded into the meeting notes. This ensures that meeting notes are generated quickly in Phase 1, while transcript downloads proceed in Phase 2 without blocking note generation or causing file bloat. The two documents are bidirectionally linked via frontmatter properties.
+The plugin operates on a robust two-stage pipeline:
+
+```
+[Granola MCP API]
+       │
+       ▼ (Stage 1: Fetch & Cache — Network, rate-limited & paced)
+[Local JSON Cache (.obsidian/plugins/.../cache/)]
+   ├── meetings/<meeting-id>.json
+   └── transcripts/<meeting-id>.json
+       │
+       ▼ (Stage 2: Render & Route — Pure local computation, < 1s)
+[Vault Markdown Notes & Transcripts (.md)]
+```
+
+- **Separated Cache Storage**: Meeting metadata and full transcripts are cached in separate JSON files under `<vault>/.obsidian/plugins/granola-meetings-simple-sync/cache/`. Because this directory is inside `.obsidian/`, it is completely invisible to vault search, backlinks, and graph views.
+- **Resumable Transcripts**: If a sync is stopped partway through downloading transcripts, downloaded transcripts are already cached on disk. The next sync resumes immediately without re-fetching existing transcripts.
+- **Two-Document Model**: Meeting notes (`type: meeting`) and transcripts (`type: transcript`) are saved as independent markdown files connected bidirectionally via frontmatter properties `meeting_transcript` and `meeting_note`.
 
 ### Available Variables
 

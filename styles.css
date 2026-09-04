@@ -13,3 +13,9 @@
 .granola-sync-progress-bar {
 	width: 180px;
 }
+
+.granola-cache-status-text {
+	font-size: 0.85em;
+	color: var(--text-muted);
+}
+

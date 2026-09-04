@@ -17,7 +17,12 @@ import {
 	buildMeetingData,
 	excludeSelf,
 	type ParsedMeetingDetails,
+	type MeetingData,
 } from "./response-parser";
+import {
+	GranolaCacheStore,
+	type CachedMeetingRecord,
+} from "./cache-manager";
 import {
 	loadTemplate,
 	applyTemplate,
@@ -62,6 +67,7 @@ interface AccountRuntime {
 export default class GranolaSyncPlugin extends Plugin {
 	settings: GranolaSyncSettings = DEFAULT_SETTINGS;
 	accounts: GranolaAccount[] = [];
+	public cacheStore!: GranolaCacheStore;
 	private pluginData: PluginData = { ...DEFAULT_SETTINGS };
 	private isSyncing = false;
 	private syncAbortController: AbortController | null = null;
@@ -135,6 +141,12 @@ export default class GranolaSyncPlugin extends Plugin {
 	override async onload(): Promise<void> {
 		await this.loadSettings();
 
+		const cacheBasePath = normalizePath(
+			`${this.app.vault.configDir}/plugins/${this.manifest.id}/cache`,
+		);
+		this.cacheStore = new GranolaCacheStore(this.app.vault.adapter, cacheBasePath);
+		await this.cacheStore.init();
+
 		// Create status bar element
 		this.statusBarItemEl = this.addStatusBarItem();
 		this.updateStatusBar();
@@ -155,6 +167,12 @@ export default class GranolaSyncPlugin extends Plugin {
 			id: "sync-meetings",
 			name: "Sync meetings",
 			callback: () => void this.syncMeetings(true),
+		});
+
+		this.addCommand({
+			id: "rerender-notes-from-cache",
+			name: "Re-render notes from cache",
+			callback: () => void this.reRenderAllNotesFromCache(),
 		});
 
 		this.addCommand({
@@ -649,6 +667,190 @@ export default class GranolaSyncPlugin extends Plugin {
 		}
 	}
 
+	async reRenderAllNotesFromCache(): Promise<void> {
+		const cachedMeetings = await this.cacheStore.listMeetings();
+		if (cachedMeetings.length === 0) {
+			new Notice("Granola: No cached meetings found. Run a sync first.");
+			return;
+		}
+
+		new Notice(`Granola: Re-rendering ${cachedMeetings.length} notes from cache...`);
+
+		const folderPathSetting = this.settings.folderPath || DEFAULT_SETTINGS.folderPath;
+		const templatePath = this.settings.templatePath || DEFAULT_SETTINGS.templatePath;
+		const filenamePattern = this.settings.filenamePattern || DEFAULT_SETTINGS.filenamePattern;
+
+		const transcriptFolderSetting =
+			this.settings.transcriptFolder || DEFAULT_SETTINGS.transcriptFolder;
+		const transcriptFilenamePattern =
+			this.settings.transcriptFilenamePattern || DEFAULT_SETTINGS.transcriptFilenamePattern;
+		const transcriptTemplatePath =
+			this.settings.transcriptTemplatePath || DEFAULT_SETTINGS.transcriptTemplatePath;
+
+		let template: string;
+		let transcriptTemplate = "";
+		try {
+			template = await loadTemplate(this.app, templatePath);
+			if (this.settings.syncTranscripts) {
+				transcriptTemplate = await loadTemplate(
+					this.app,
+					transcriptTemplatePath,
+					DEFAULT_TRANSCRIPT_TEMPLATE,
+				);
+			}
+		} catch (error) {
+			const message = error instanceof Error ? error.message : "Unknown error";
+			new Notice(`Error loading template: ${message}`);
+			return;
+		}
+
+		const folderPathPattern = normalizePath(folderPathSetting);
+		const folderBasePath = getFolderBasePath(folderPathPattern);
+		try {
+			await this.ensureFolderExists(folderBasePath);
+		} catch (error) {
+			const message = error instanceof Error ? error.message : "Unknown error";
+			new Notice(`Error creating folder: ${message}`);
+			return;
+		}
+
+		const existingDocs = new Map<string, TFile>();
+		const existingTranscripts = new Map<string, TFile>();
+		const files = this.app.vault.getMarkdownFiles();
+		for (const file of syncFolderFirst(files, folderBasePath)) {
+			const fileCache = this.app.metadataCache.getFileCache(file);
+			const granolaId = fileCache?.frontmatter?.granola_id as string | undefined;
+			const type = fileCache?.frontmatter?.type as string | undefined;
+			if (granolaId) {
+				if (type === "transcript") {
+					if (!existingTranscripts.has(granolaId)) {
+						existingTranscripts.set(granolaId, file);
+					}
+				} else {
+					if (!existingDocs.has(granolaId)) {
+						existingDocs.set(granolaId, file);
+					}
+				}
+			}
+		}
+
+		const emailToNoteTitle = new Map<string, string>();
+		if (this.settings.matchAttendeesByEmail) {
+			for (const file of files) {
+				const fileCache = this.app.metadataCache.getFileCache(file);
+				const emails: unknown = fileCache?.frontmatter?.emails;
+				if (Array.isArray(emails)) {
+					for (const email of emails) {
+						if (typeof email === "string") {
+							emailToNoteTitle.set(email.toLowerCase(), file.basename);
+						}
+					}
+				} else if (typeof emails === "string") {
+					emailToNoteTitle.set(emails.toLowerCase(), file.basename);
+				}
+			}
+		}
+
+		const accountEmails = new Set<string>();
+		if (this.settings.excludeSelfFromAttendees) {
+			for (const a of this.accounts) {
+				if (a.email) accountEmails.add(a.email.toLowerCase());
+			}
+		}
+
+		let notesRendered = 0;
+		let transcriptsRendered = 0;
+
+		for (const cached of cachedMeetings) {
+			let participants = cached.participants;
+			if (accountEmails.size > 0) {
+				participants = participants.filter(
+					(p) => !p.email || !accountEmails.has(p.email.toLowerCase()),
+				);
+			}
+
+			const meetingData: MeetingData = {
+				id: cached.id,
+				title: cached.title,
+				date: cached.date,
+				startTime: cached.startTime,
+				created: cached.created,
+				url: cached.url,
+				folder: cached.folder,
+				participants,
+				privateNotes: cached.privateNotes,
+				enhancedNotes: cached.enhancedNotes,
+				transcript: "",
+			};
+
+			const meetingPathInfo = resolveNotePath(
+				folderPathPattern,
+				filenamePattern,
+				meetingData,
+			);
+			const transcriptPathInfo = resolveTranscriptPath(
+				transcriptFolderSetting,
+				transcriptFilenamePattern,
+				meetingData,
+				meetingPathInfo.folder,
+				meetingPathInfo.filename,
+			);
+
+			const content = applyTemplate(template, meetingData, emailToNoteTitle, {
+				granola_meeting_transcript: transcriptPathInfo.filename,
+			});
+
+			await this.ensureFolderExists(meetingPathInfo.folder);
+			const existingFile = existingDocs.get(cached.id);
+			if (existingFile) {
+				await this.app.vault.modify(existingFile, content);
+			} else {
+				const newFile = await this.app.vault.create(meetingPathInfo.path, content);
+				existingDocs.set(cached.id, newFile);
+			}
+			notesRendered++;
+
+			if (this.settings.syncTranscripts) {
+				const cachedTranscript = await this.cacheStore.getTranscript(cached.id);
+				if (cachedTranscript) {
+					meetingData.transcript = cachedTranscript;
+					const transcriptContent = applyTemplate(
+						transcriptTemplate,
+						meetingData,
+						emailToNoteTitle,
+						{
+							granola_meeting_note: meetingPathInfo.filename,
+						},
+					);
+
+					await this.ensureFolderExists(transcriptPathInfo.folder);
+					const existingTranscriptFile = existingTranscripts.get(cached.id);
+					if (existingTranscriptFile) {
+						await this.app.vault.modify(existingTranscriptFile, transcriptContent);
+					} else {
+						const newTranscriptFile = await this.app.vault.create(
+							transcriptPathInfo.path,
+							transcriptContent,
+						);
+						existingTranscripts.set(cached.id, newTranscriptFile);
+					}
+					transcriptsRendered++;
+				}
+			}
+		}
+
+		new Notice(
+			`Granola: Re-rendered ${notesRendered} notes and ${transcriptsRendered} transcripts from cache`,
+		);
+		this.refreshSettingsTab();
+	}
+
+	async clearCache(): Promise<void> {
+		await this.cacheStore.clear();
+		new Notice("Granola: Local cache cleared");
+		this.refreshSettingsTab();
+	}
+
 	/**
 	 * Create `folderPath` and any missing parents.
 	 *
@@ -753,9 +955,29 @@ export default class GranolaSyncPlugin extends Plugin {
 		for (const m of meetingsToSyncNotes) neededIdsSet.add(m.id);
 		for (const m of meetingsToSyncTranscripts) neededIdsSet.add(m.id);
 
-		const idsToFetch = Array.from(neededIdsSet);
+		// Check which meeting details we already have in local cache
 		const allDetails: ParsedMeetingDetails[] = [];
 		const detailsMap = new Map<string, ParsedMeetingDetails>();
+		const idsToFetch: string[] = [];
+
+		for (const id of neededIdsSet) {
+			const cached = await this.cacheStore.getMeeting(id);
+			if (cached) {
+				const parsed: ParsedMeetingDetails = {
+					id: cached.id,
+					title: cached.title,
+					date: cached.date,
+					participants: cached.participants,
+					folder: cached.folder,
+					privateNotes: cached.privateNotes,
+					summary: cached.enhancedNotes,
+				};
+				detailsMap.set(id, parsed);
+				allDetails.push(parsed);
+			} else {
+				idsToFetch.push(id);
+			}
+		}
 
 		for (let i = 0; i < idsToFetch.length; i += 10) {
 			if (ctx.signal.aborted) throw new DOMException("The operation was aborted", "AbortError");
@@ -766,6 +988,21 @@ export default class GranolaSyncPlugin extends Plugin {
 				allDetails.push(...parsed);
 				for (const item of parsed) {
 					detailsMap.set(item.id, item);
+					const meetingData = buildMeetingData(item, "");
+					const record: CachedMeetingRecord = {
+						id: item.id,
+						title: item.title,
+						date: meetingData.date,
+						startTime: meetingData.startTime,
+						created: meetingData.created,
+						url: meetingData.url,
+						folder: item.folder,
+						participants: item.participants,
+						privateNotes: item.privateNotes,
+						enhancedNotes: item.summary,
+						lastSyncedAt: new Date().toISOString(),
+					};
+					await this.cacheStore.saveMeeting(record);
 				}
 			} catch (error) {
 				if (this.isAbortError(error)) throw error;
@@ -843,6 +1080,7 @@ export default class GranolaSyncPlugin extends Plugin {
 		// ----------------------------------------------------
 		let transcriptsCreated = 0;
 		if (this.settings.syncTranscripts && meetingsToSyncTranscripts.length > 0) {
+			let networkTranscriptsCount = 0;
 			for (let i = 0; i < meetingsToSyncTranscripts.length; i++) {
 				if (ctx.signal.aborted) throw new DOMException("The operation was aborted", "AbortError");
 				const m = meetingsToSyncTranscripts[i];
@@ -852,38 +1090,44 @@ export default class GranolaSyncPlugin extends Plugin {
 					continue;
 				}
 
-				// Enforce pacing between transcript fetches (~65 seconds)
-				if (i > 0) {
-					await sleep(TRANSCRIPT_FETCH_SPACING_MS, ctx.signal, (remainingSeconds) => {
-						this.notifyProgress({
-							phase: "transcripts",
-							current: i,
-							total: meetingsToSyncTranscripts.length,
-							countdownSeconds: remainingSeconds,
-							message: "",
-						});
-					});
-				}
-
-				this.notifyProgress({
-					phase: "transcripts",
-					current: i + 1,
-					total: meetingsToSyncTranscripts.length,
-					message: `Downloading transcript ${i + 1} of ${meetingsToSyncTranscripts.length}...`,
-				});
-
-				let rawTranscript = "";
-				try {
-					rawTranscript = await mcp.getTranscript(m.id, ctx.signal);
-				} catch (error) {
-					if (this.isAbortError(error)) throw error;
-					console.error(`Granola: transcript fetch failed for ${m.id}`, error);
-					continue;
-				}
-
-				const transcript = parseTranscriptResponse(rawTranscript);
+				let transcript = await this.cacheStore.getTranscript(m.id);
 				if (!transcript) {
-					continue;
+					// Enforce pacing between network transcript fetches (~65 seconds)
+					if (networkTranscriptsCount > 0) {
+						await sleep(TRANSCRIPT_FETCH_SPACING_MS, ctx.signal, (remainingSeconds) => {
+							this.notifyProgress({
+								phase: "transcripts",
+								current: i,
+								total: meetingsToSyncTranscripts.length,
+								countdownSeconds: remainingSeconds,
+								message: "",
+							});
+						});
+					}
+
+					this.notifyProgress({
+						phase: "transcripts",
+						current: i + 1,
+						total: meetingsToSyncTranscripts.length,
+						message: `Downloading transcript ${i + 1} of ${meetingsToSyncTranscripts.length}...`,
+					});
+
+					let rawTranscript = "";
+					try {
+						rawTranscript = await mcp.getTranscript(m.id, ctx.signal);
+					} catch (error) {
+						if (this.isAbortError(error)) throw error;
+						console.error(`Granola: transcript fetch failed for ${m.id}`, error);
+						continue;
+					}
+
+					const parsed = parseTranscriptResponse(rawTranscript);
+					if (!parsed) {
+						continue;
+					}
+					transcript = parsed;
+					networkTranscriptsCount++;
+					await this.cacheStore.saveTranscript(m.id, transcript);
 				}
 
 				try {
