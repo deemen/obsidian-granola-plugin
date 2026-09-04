@@ -9,9 +9,11 @@ import {
 import { GranolaAuthProvider, type AuthStorage } from "./auth";
 import { GranolaMcpClient } from "./mcp-client";
 import { syncFolderFirst } from "./note-scope";
+import { RateLimiter } from "./rate-limiter";
 import {
 	parseMeetingsResponse,
 	parseTranscriptResponse,
+	extractStoredTranscript,
 	parseAccountInfo,
 	buildMeetingData,
 	excludeSelf,
@@ -54,6 +56,7 @@ export default class GranolaSyncPlugin extends Plugin {
 	private pendingAuthAccountId: string | null = null;
 	/** Folders created or confirmed during the current sync run. */
 	private ensuredFolders = new Set<string>();
+	private rateLimiter = new RateLimiter();
 
 	override async onload(): Promise<void> {
 		await this.loadSettings();
@@ -115,6 +118,7 @@ export default class GranolaSyncPlugin extends Plugin {
 
 	override onunload(): void {
 		this.clearSyncInterval();
+		this.rateLimiter.reset();
 		for (const runtime of this.runtimes.values()) {
 			void runtime.mcp.disconnect();
 		}
@@ -194,7 +198,7 @@ export default class GranolaSyncPlugin extends Plugin {
 				this.refreshSettingsTab();
 			}
 		});
-		const mcp = new GranolaMcpClient(auth);
+		const mcp = new GranolaMcpClient(auth, this.rateLimiter);
 		const runtime: AccountRuntime = { auth, mcp };
 		this.runtimes.set(account.id, runtime);
 		return runtime;
@@ -611,15 +615,28 @@ export default class GranolaSyncPlugin extends Plugin {
 					continue;
 				}
 
+				const existingFile = ctx.existingDocs.get(details.id);
+
 				// Optionally fetch transcript
 				let transcript = "";
 				if (this.settings.syncTranscripts) {
-					try {
-						const transcriptResponse = await mcp.getTranscript(details.id);
-						transcript = parseTranscriptResponse(transcriptResponse);
-					} catch (error) {
-						console.error(`Granola: transcript fetch failed for ${details.id}`, error);
+					// Reuse valid stored transcript to avoid redundant API calls
+					if (existingFile) {
+						transcript = extractStoredTranscript(await this.app.vault.read(existingFile));
 					}
+
+					if (!transcript) {
+						try {
+							const transcriptResponse = await mcp.getTranscript(details.id);
+							transcript = parseTranscriptResponse(transcriptResponse);
+						} catch (error) {
+							console.error(`Granola: transcript fetch failed for ${details.id}`, error);
+							// Never replace an existing note if transcript was requested but failed
+							if (existingFile) continue;
+						}
+					}
+
+					if (!transcript && existingFile) continue;
 				}
 
 				const meetingData = buildMeetingData(details, transcript);
@@ -627,7 +644,6 @@ export default class GranolaSyncPlugin extends Plugin {
 					meetingData.participants = excludeSelf(meetingData.participants, account.email);
 				}
 				const content = applyTemplate(ctx.template, meetingData, ctx.emailToNoteTitle);
-				const existingFile = ctx.existingDocs.get(details.id);
 
 				if (existingFile) {
 					await this.app.vault.modify(existingFile, content);

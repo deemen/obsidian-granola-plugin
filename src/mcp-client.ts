@@ -2,6 +2,8 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { GranolaAuthProvider } from "./auth";
 import { nodeFetch } from "./fetch";
+import { RateLimiter } from "./rate-limiter";
+import { isTranscriptErrorResponse } from "./response-parser";
 
 const MCP_SERVER_URL = "https://mcp.granola.ai/mcp";
 
@@ -81,9 +83,11 @@ export function buildListMeetingsArgs(
 export class GranolaMcpClient {
 	private client: Client | null = null;
 	private authProvider: GranolaAuthProvider;
+	private rateLimiter: RateLimiter;
 
-	constructor(authProvider: GranolaAuthProvider) {
+	constructor(authProvider: GranolaAuthProvider, rateLimiter = new RateLimiter()) {
 		this.authProvider = authProvider;
+		this.rateLimiter = rateLimiter;
 	}
 
 	get isConnected(): boolean {
@@ -145,14 +149,30 @@ export class GranolaMcpClient {
 		return this.callToolText("get_account_info", {});
 	}
 
-	private async callToolText(name: string, args: Record<string, unknown>): Promise<string> {
-		if (!this.client) {
-			throw new Error("Not connected to Granola");
-		}
-		const result = await this.client.callTool({ name, arguments: args });
-		return (result.content as Array<{ type: string; text?: string }>)
-			.filter((c) => c.type === "text" && typeof c.text === "string")
-			.map((c) => c.text!)
-			.join("\n");
+	private async callToolText(name: string, args: Record<string, unknown>, retries = 2): Promise<string> {
+		return this.rateLimiter.execute(async () => {
+			for (let attempt = 0; attempt <= retries; attempt++) {
+				if (!this.client) {
+					throw new Error("Not connected to Granola");
+				}
+				const result = await this.client.callTool({ name, arguments: args });
+				const text = (result.content as Array<{ type: string; text?: string }>)
+					.filter((c) => c.type === "text" && typeof c.text === "string")
+					.map((c) => c.text!)
+					.join("\n");
+
+				if (isTranscriptErrorResponse(text)) {
+					if (attempt < retries) {
+						const delay = 2000 * Math.pow(2, attempt);
+						await this.rateLimiter.backoff(delay);
+						continue;
+					}
+					throw new Error(`Granola rate limit: ${text.trim()}`);
+				}
+
+				return text;
+			}
+			throw new Error("Tool execution failed after retries");
+		});
 	}
 }

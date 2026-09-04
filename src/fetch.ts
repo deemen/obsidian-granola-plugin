@@ -7,9 +7,77 @@ import { request as httpRequest } from "node:http";
 import type { IncomingMessage } from "node:http";
 
 const MAX_REDIRECTS = 5;
+export const MAX_RETRIES = 3;
+export const BASE_RETRY_DELAY_MS = 1500;
+export const MAX_RETRY_DELAY_MS = 30000;
 
-export function nodeFetch(input: string | URL, init?: RequestInit): Promise<Response> {
-	return doFetch(input, init, 0);
+/**
+ * Parse a Retry-After header into milliseconds.
+ * Supports either integer seconds or an HTTP-date string.
+ */
+export function parseRetryAfter(headerValue: string | null | undefined): number | null {
+	if (!headerValue) return null;
+	const trimmed = headerValue.trim();
+	if (!trimmed) return null;
+	const seconds = Number(trimmed);
+	if (!isNaN(seconds) && seconds >= 0) {
+		return seconds * 1000;
+	}
+	const date = new Date(trimmed);
+	if (!isNaN(date.getTime())) {
+		const diff = date.getTime() - Date.now();
+		return Math.max(0, diff);
+	}
+	return null;
+}
+
+/**
+ * Compute the delay for a retry attempt.
+ */
+export function computeRetryDelay(attempt: number, retryAfterMs: number | null, randomFn = Math.random): number {
+	if (retryAfterMs !== null) {
+		return Math.min(retryAfterMs + randomFn() * 250, MAX_RETRY_DELAY_MS);
+	}
+	const backoff = BASE_RETRY_DELAY_MS * Math.pow(2, attempt);
+	const jitter = randomFn() * 500;
+	return Math.min(backoff + jitter, MAX_RETRY_DELAY_MS);
+}
+
+export async function nodeFetch(input: string | URL, init?: RequestInit): Promise<Response> {
+	let attempt = 0;
+	while (true) {
+		if (init?.signal?.aborted) {
+			throw new DOMException("The operation was aborted", "AbortError");
+		}
+		const response = await doFetch(input, init, 0);
+		if ((response.status === 429 || response.status === 503) && attempt < MAX_RETRIES) {
+			const retryAfter = parseRetryAfter(response.headers.get("retry-after"));
+			const delay = computeRetryDelay(attempt, retryAfter);
+			attempt++;
+			// Consume body so Node releases socket
+			await response.text().catch(() => {});
+			await sleepWithAbort(delay, init?.signal);
+			continue;
+		}
+		return response;
+	}
+}
+
+function sleepWithAbort(delayMs: number, signal?: AbortSignal | null): Promise<void> {
+	return new Promise<void>((resolve, reject) => {
+		const timer = window.setTimeout(resolve, delayMs);
+
+		if (signal) {
+			signal.addEventListener(
+				"abort",
+				() => {
+					window.clearTimeout(timer);
+					reject(new DOMException("The operation was aborted", "AbortError"));
+				},
+				{ once: true },
+			);
+		}
+	});
 }
 
 function doFetch(input: string | URL, init: RequestInit | undefined, redirectCount: number): Promise<Response> {
