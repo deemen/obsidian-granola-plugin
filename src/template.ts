@@ -2,7 +2,11 @@ import { App, moment, normalizePath, TFile } from "obsidian";
 import type { MeetingData, ParsedParticipant } from "./response-parser";
 import DEFAULT_TEMPLATE from "./default-template.md";
 
-export async function loadTemplate(app: App, templatePath: string): Promise<string> {
+export async function loadTemplate(
+	app: App,
+	templatePath: string,
+	defaultContent: string = DEFAULT_TEMPLATE,
+): Promise<string> {
 	const normalizedPath = normalizePath(templatePath);
 	const file = app.vault.getAbstractFileByPath(normalizedPath);
 
@@ -19,8 +23,8 @@ export async function loadTemplate(app: App, templatePath: string): Promise<stri
 			await app.vault.createFolder(folderPath);
 		}
 	}
-	await app.vault.create(normalizedPath, DEFAULT_TEMPLATE);
-	return DEFAULT_TEMPLATE;
+	await app.vault.create(normalizedPath, defaultContent);
+	return defaultContent;
 }
 
 function resolveParticipantName(
@@ -40,6 +44,7 @@ export function applyTemplate(
 	template: string,
 	meeting: MeetingData,
 	emailToNoteTitle: Map<string, string> = new Map(),
+	extraVariables: Record<string, string> = {},
 ): string {
 	// Resolve attendee names, preferring matches from vault notes
 	const attendeeNames = meeting.participants
@@ -55,6 +60,7 @@ export function applyTemplate(
 		granola_private_notes: meeting.privateNotes,
 		granola_enhanced_notes: meeting.enhancedNotes,
 		granola_transcript: meeting.transcript,
+		granola_folder: meeting.folder ?? "",
 		granola_attendees: attendeeNames.join(", "),
 		granola_attendees_linked: attendeeNames.map((name) => `[[${name}]]`).join(", "),
 		granola_attendees_list: attendeeNames.map((name) => `  - ${name}`).join("\n"),
@@ -65,6 +71,22 @@ export function applyTemplate(
 		granola_duration: "",
 		granola_start_time: meeting.startTime,
 		granola_end_time: "",
+		granola_meeting_note: extraVariables.granola_meeting_note ?? "",
+		granola_meeting_link:
+			extraVariables.granola_meeting_link ??
+			(extraVariables.granola_meeting_note ? `[[${extraVariables.granola_meeting_note}]]` : ""),
+		granola_meeting_transcript: extraVariables.granola_meeting_transcript ?? "",
+		granola_meeting_transcript_link:
+			extraVariables.granola_meeting_transcript_link ??
+			(extraVariables.granola_meeting_transcript
+				? `[[${extraVariables.granola_meeting_transcript}]]`
+				: ""),
+		// Legacy / alternative aliases
+		granola_transcript_note: extraVariables.granola_meeting_transcript ?? "",
+		granola_transcript_link: extraVariables.granola_meeting_transcript
+			? `[[${extraVariables.granola_meeting_transcript}]]`
+			: "",
+		...extraVariables,
 	};
 
 	// Process conditional blocks: {{#var}}content{{/var}} - only renders if var is non-empty
@@ -147,8 +169,8 @@ export function sanitizeFilename(name: string): string {
 		.trim() || "Untitled";
 }
 
-/** A `{date}` placeholder, optionally carrying a moment format: `{date:YYYY/MM}`. */
-const DATE_TOKEN = /\{date(?::([^}]+))?\}/g;
+/** A `{date}` or `{meeting_date}` placeholder, optionally carrying a moment format: `{date:YYYY/MM}`. */
+const DATE_TOKEN = /\{(?:date|meeting_date)(?::([^}]+))?\}/g;
 
 /**
  * Meeting dates arrive as ISO `YYYY-MM-DD` strings. Parse with an explicit input
@@ -175,7 +197,7 @@ function formatMeetingDate(date: string, format: string): string {
 }
 
 /**
- * Expand `{date}` / `{date:FORMAT}` in a folder path, so meetings can be filed
+ * Expand `{date}` / `{meeting_date}` / `{date:FORMAT}` in a folder path, so meetings can be filed
  * into dated subfolders like `Meetings/{date:YYYY/MM}`. Slashes in the result are
  * meaningful here — they are what creates the nesting.
  */
@@ -186,43 +208,98 @@ export function resolveDatePattern(pattern: string, date: string): string {
 }
 
 /**
- * The fixed leading part of a folder pattern, before any date token — the folder
+ * The fixed leading part of a folder pattern, before any dynamic token — the folder
  * every dated subfolder lives under. Created up front so a sync still has a home
  * folder to report against before any meeting has been placed.
  */
 export function getFolderBasePath(folderPattern: string): string {
-	// split returns the whole string as one element when there is no date token.
-	return folderPattern.split(DATE_TOKEN)[0].replace(/\/+$/, "");
+	// split returns the whole string as one element when there is no dynamic token.
+	return folderPattern.split(/\{[^}]+\}/)[0].replace(/\/+$/, "");
 }
 
 /**
- * Expand `{date}`, `{date:FORMAT}`, `{title}` and `{id}` in the user's filename
- * pattern.
- *
- * Both passes use a replacer function rather than `String.replace(string, string)`,
- * which interprets `$&`, `` $` `` and `$'` inside the *replacement* — a meeting
- * titled "Q3 $& Q4" used to expand to the text the pattern had just matched. Title
- * and id share one pass so an expanded value is never rescanned: a title containing
- * the literal "{id}" used to have it replaced by the meeting id.
+ * Sanitize a folder segment or path string for folder creation.
+ * Preserves slashes for hierarchy, but sanitizes each segment with sanitizeFilename.
+ */
+export function sanitizeFolderPath(pathStr: string): string {
+	return pathStr
+		.split(/[\\/]+/)
+		.map((seg) => sanitizeFilename(seg))
+		.filter((seg) => seg && seg !== "Untitled")
+		.join("/");
+}
+
+/**
+ * Expand `{date}`, `{meeting_date}`, `{date:FORMAT}`, `{title}`, `{meeting_name}`, `{id}`,
+ * `{granolaFolder}`, `{folder}`, and any extra tokens (e.g. `{meeting_filename}`, `{filename}`)
+ * in the user's filename pattern.
  *
  * The result is a file *name*, never a path: a separator surviving from a format
  * like `{date:YYYY/MM}`, or typed into the pattern directly, is folded to a hyphen
  * rather than quietly nesting the note. Subfolders are the folder setting's job,
  * which takes the same date tokens.
  */
-export function generateFilename(pattern: string, meeting: MeetingData): string {
+export function generateFilename(
+	pattern: string,
+	meeting: MeetingData,
+	extraTokens: Record<string, string> = {},
+): string {
+	const sanitizedTitle = sanitizeFilename(meeting.title);
+	const sanitizedFolder = meeting.folder ? sanitizeFilename(meeting.folder) : "";
+
 	const values: Record<string, string> = {
-		title: sanitizeFilename(meeting.title),
+		title: sanitizedTitle,
+		meeting_name: sanitizedTitle,
 		id: meeting.id.slice(0, 8),
+		folder: sanitizedFolder,
+		granolaFolder: sanitizedFolder,
+		...Object.fromEntries(
+			Object.entries(extraTokens).map(([k, v]) => [k, sanitizeFilename(v)]),
+		),
 	};
 
+	const tokenKeys = Object.keys(values).join("|");
+	const tokenRegex = new RegExp(`\\{(${tokenKeys})\\}`, "g");
+
 	return resolveDatePattern(pattern, meeting.date)
-		.replace(/\{(title|id)\}/g, (_, token: string) => values[token])
+		.replace(tokenRegex, (_, token: string) => values[token] ?? "")
 		.replace(UNSAFE_FILENAME_CHARS, "-");
 }
 
 /**
- * Where a meeting's note belongs: the folder to create, and the note's full path.
+ * Expand dynamic tokens in a folder path pattern. Slashes in the result create nesting.
+ */
+export function resolveFolderPath(
+	folderPattern: string,
+	meeting: MeetingData,
+	extraTokens: Record<string, string> = {},
+): string {
+	const sanitizedFolder = meeting.folder ? sanitizeFolderPath(meeting.folder) : "";
+	const sanitizedTitle = sanitizeFilename(meeting.title);
+
+	const values: Record<string, string> = {
+		title: sanitizedTitle,
+		meeting_name: sanitizedTitle,
+		id: meeting.id.slice(0, 8),
+		folder: sanitizedFolder,
+		granolaFolder: sanitizedFolder,
+		meeting_folder: extraTokens.meeting_folder ? normalizePath(extraTokens.meeting_folder) : "",
+		...extraTokens,
+	};
+
+	const tokenKeys = Object.keys(values).join("|");
+	const tokenRegex = new RegExp(`\\{(${tokenKeys})\\}`, "g");
+
+	const expanded = resolveDatePattern(folderPattern, meeting.date).replace(
+		tokenRegex,
+		(_, token: string) => values[token] ?? "",
+	);
+
+	return normalizePath(expanded);
+}
+
+/**
+ * Where a meeting's note belongs: the folder to create, filename, and the note's full path.
  *
  * Both come back from one place because they have to agree — the path is built by
  * joining the folder to the filename, and `normalizePath` is what reconciles the
@@ -234,8 +311,30 @@ export function resolveNotePath(
 	folderPattern: string,
 	filenamePattern: string,
 	meeting: MeetingData,
-): { folder: string; path: string } {
-	const folder = normalizePath(resolveDatePattern(folderPattern, meeting.date));
+): { folder: string; filename: string; path: string } {
+	const folder = resolveFolderPath(folderPattern, meeting);
 	const filename = generateFilename(filenamePattern, meeting);
-	return { folder, path: normalizePath(`${folder}/${filename}.md`) };
+	const path = folder === "/" || folder === "" ? `${filename}.md` : normalizePath(`${folder}/${filename}.md`);
+	return { folder, filename, path };
+}
+
+/**
+ * Where a meeting's transcript note belongs. Supports `{meeting_folder}` and `{meeting_filename}`/`{filename}`.
+ */
+export function resolveTranscriptPath(
+	transcriptFolderPattern: string,
+	transcriptFilenamePattern: string,
+	meeting: MeetingData,
+	meetingFolder: string,
+	meetingFilename: string,
+): { folder: string; filename: string; path: string } {
+	const extraTokens: Record<string, string> = {
+		meeting_folder: meetingFolder,
+		meeting_filename: meetingFilename,
+		filename: meetingFilename,
+	};
+	const folder = resolveFolderPath(transcriptFolderPattern, meeting, extraTokens);
+	const filename = generateFilename(transcriptFilenamePattern, meeting, extraTokens);
+	const path = folder === "/" || folder === "" ? `${filename}.md` : normalizePath(`${folder}/${filename}.md`);
+	return { folder, filename, path };
 }

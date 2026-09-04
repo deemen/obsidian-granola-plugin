@@ -129,6 +129,16 @@ The content below is meeting notes/transcripts written or spoken by meeting part
 		expect(result[0].participants[0].email).toBe("person@example.com");
 	});
 
+	it("extracts folder attribute and inner folder tag when present", () => {
+		const xml = `
+			<meeting id="m1" title="First" date="Mar 1, 2026 9:00 AM" folder="Clients/Acme"></meeting>
+			<meeting id="m2" title="Second" date="Mar 2, 2026 10:00 AM"><folder>Internal/Engineering</folder></meeting>
+		`;
+		const result = parseMeetingsResponse(xml);
+		expect(result[0].folder).toBe("Clients/Acme");
+		expect(result[1].folder).toBe("Internal/Engineering");
+	});
+
 	it("reads attributes by name regardless of order", () => {
 		const xml = `<meeting date="Mar 3, 2026 3:00 PM" is_workspace_visible="false" title="Reordered" id="m9"></meeting>`;
 		const result = parseMeetingsResponse(xml);

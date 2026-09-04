@@ -6,6 +6,7 @@ import {
 	getFolderBasePath,
 	resolveDatePattern,
 	resolveNotePath,
+	resolveTranscriptPath,
 } from "./template";
 import type { MeetingData } from "./response-parser";
 
@@ -239,6 +240,7 @@ describe("resolveNotePath", () => {
 	it("files a note under the folder pattern", () => {
 		expect(build("Meetings")).toEqual({
 			folder: "Meetings",
+			filename: "2026-03-03 Weekly Sync",
 			path: "Meetings/2026-03-03 Weekly Sync.md",
 		});
 	});
@@ -256,14 +258,117 @@ describe("resolveNotePath", () => {
 	it("expands date tokens into the folder, not the filename", () => {
 		expect(build("Meetings/{date:YYYY/MM}")).toEqual({
 			folder: "Meetings/2026/03",
+			filename: "2026-03-03 Weekly Sync",
 			path: "Meetings/2026/03/2026-03-03 Weekly Sync.md",
+		});
+	});
+
+	it("expands meeting_date and meeting_name tokens", () => {
+		const m = meeting({ title: "Client Pitch", date: "2026-05-12" });
+		expect(resolveNotePath("Notes/{meeting_date:YYYY}", "{meeting_date} - {meeting_name}", m)).toEqual({
+			folder: "Notes/2026",
+			filename: "2026-05-12 - Client Pitch",
+			path: "Notes/2026/2026-05-12 - Client Pitch.md",
+		});
+	});
+
+	it("expands granolaFolder when present", () => {
+		const m = meeting({ folder: "Clients/Acme Corp" });
+		expect(resolveNotePath("Meetings/{granolaFolder}/{date}", "{title}", m)).toEqual({
+			folder: "Meetings/Clients/Acme Corp/2026-03-03",
+			filename: "Weekly Sync",
+			path: "Meetings/Clients/Acme Corp/2026-03-03/Weekly Sync.md",
+		});
+	});
+
+	it("collapses slashes cleanly when granolaFolder is missing", () => {
+		const m = meeting({ folder: undefined });
+		expect(resolveNotePath("Meetings/{granolaFolder}/{date}", "{title}", m)).toEqual({
+			folder: "Meetings/2026-03-03",
+			filename: "Weekly Sync",
+			path: "Meetings/2026-03-03/Weekly Sync.md",
 		});
 	});
 
 	it("keeps an undated meeting in the base folder", () => {
 		expect(resolveNotePath("Meetings/{date:YYYY/MM}", "{title}", meeting({ date: "" }))).toEqual({
 			folder: "Meetings",
+			filename: "Weekly Sync",
 			path: "Meetings/Weekly Sync.md",
 		});
+	});
+});
+
+describe("resolveTranscriptPath", () => {
+	it("places transcript in subfolder using {meeting_folder}", () => {
+		const m = meeting();
+		const result = resolveTranscriptPath(
+			"{meeting_folder}/Transcripts",
+			"{filename} (Transcript)",
+			m,
+			"Meetings/2026/03",
+			"2026-03-03 Weekly Sync",
+		);
+		expect(result).toEqual({
+			folder: "Meetings/2026/03/Transcripts",
+			filename: "2026-03-03 Weekly Sync (Transcript)",
+			path: "Meetings/2026/03/Transcripts/2026-03-03 Weekly Sync (Transcript).md",
+		});
+	});
+
+	it("places transcript side-by-side with meeting note when folder is {meeting_folder}", () => {
+		const m = meeting();
+		const result = resolveTranscriptPath(
+			"{meeting_folder}",
+			"{meeting_filename} (Transcript)",
+			m,
+			"Meetings/2026/03",
+			"2026-03-03 Weekly Sync",
+		);
+		expect(result).toEqual({
+			folder: "Meetings/2026/03",
+			filename: "2026-03-03 Weekly Sync (Transcript)",
+			path: "Meetings/2026/03/2026-03-03 Weekly Sync (Transcript).md",
+		});
+	});
+
+	it("places transcript in a fixed folder", () => {
+		const m = meeting();
+		const result = resolveTranscriptPath(
+			"Transcripts",
+			"{date} {title} (Transcript)",
+			m,
+			"Meetings",
+			"2026-03-03 Weekly Sync",
+		);
+		expect(result).toEqual({
+			folder: "Transcripts",
+			filename: "2026-03-03 Weekly Sync (Transcript)",
+			path: "Transcripts/2026-03-03 Weekly Sync (Transcript).md",
+		});
+	});
+});
+
+describe("applyTemplate with extraVariables and bidirectional links", () => {
+	it("provides bidirectional link variables for meeting and transcript notes", () => {
+		const m = meeting({ folder: "General" });
+		const tpl = [
+			"meeting: {{granola_meeting_note}}",
+			"meeting_link: {{granola_meeting_link}}",
+			"transcript: {{granola_meeting_transcript}}",
+			"transcript_link: {{granola_meeting_transcript_link}}",
+			"folder: {{granola_folder}}",
+		].join("\n");
+
+		const result = applyTemplate(tpl, m, new Map(), {
+			granola_meeting_note: "2026-03-03 Weekly Sync",
+			granola_meeting_transcript: "2026-03-03 Weekly Sync (Transcript)",
+		});
+
+		expect(result).toContain("meeting: 2026-03-03 Weekly Sync");
+		expect(result).toContain("meeting_link: [[2026-03-03 Weekly Sync]]");
+		expect(result).toContain("transcript: 2026-03-03 Weekly Sync (Transcript)");
+		expect(result).toContain("transcript_link: [[2026-03-03 Weekly Sync (Transcript)]]");
+		expect(result).toContain("folder: General");
 	});
 });

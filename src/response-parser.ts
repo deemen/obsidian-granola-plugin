@@ -10,6 +10,7 @@ export interface ParsedMeeting {
 	title: string;
 	date: string; // raw from API, e.g. "Mar 3, 2026 3:00 PM"
 	participants: ParsedParticipant[];
+	folder?: string;
 }
 
 export interface ParsedMeetingDetails extends ParsedMeeting {
@@ -28,6 +29,7 @@ export interface MeetingData {
 	enhancedNotes: string;
 	transcript: string;
 	participants: ParsedParticipant[];
+	folder?: string;
 }
 
 /**
@@ -105,6 +107,20 @@ export function parseMeetingsResponse(xml: string): ParsedMeetingDetails[] {
 		if (!id) continue;
 		const title = attr(openTag, "title");
 		const date = attr(openTag, "date");
+		const folderAttr =
+			attr(openTag, "folder") ||
+			attr(openTag, "folder_name") ||
+			attr(openTag, "folder_title") ||
+			attr(openTag, "granola_folder");
+		let folder = folderAttr || undefined;
+		if (!folder) {
+			const folderTagMatch =
+				body.match(/<folder>\s*([\s\S]*?)\s*<\/folder>/i) ||
+				body.match(/<folder_name>\s*([\s\S]*?)\s*<\/folder_name>/i);
+			if (folderTagMatch) {
+				folder = decodeXmlEntities(folderTagMatch[1].trim()) || undefined;
+			}
+		}
 
 		const participantsMatch = body.match(/<known_participants>\s*([\s\S]*?)\s*<\/known_participants>/);
 		const participants = participantsMatch
@@ -117,7 +133,7 @@ export function parseMeetingsResponse(xml: string): ParsedMeetingDetails[] {
 		const summaryMatch = body.match(/<summary>\s*([\s\S]*?)\s*<\/summary>/);
 		const summary = summaryMatch ? normalizeTaskItems(decodeXmlEntities(summaryMatch[1].trim())) : "";
 
-		meetings.push({ id, title, date, participants, privateNotes, summary });
+		meetings.push({ id, title, date, participants, privateNotes, summary, folder });
 	}
 
 	return meetings;
@@ -354,5 +370,6 @@ export function buildMeetingData(
 		enhancedNotes: details.summary,
 		transcript: formatTranscriptText(transcript),
 		participants: details.participants,
+		folder: details.folder,
 	};
 }
