@@ -1,5 +1,10 @@
 import { describe, it, expect } from "vitest";
-import { parseRetryAfter, computeRetryDelay, BASE_RETRY_DELAY_MS, MAX_RETRY_DELAY_MS } from "./fetch";
+import {
+	parseRetryAfter,
+	computeRetryDelay,
+	DEFAULT_BASE_RETRY_DELAY_MS,
+	DEFAULT_MAX_RETRY_DELAY_MS,
+} from "./fetch";
 
 describe("parseRetryAfter", () => {
 	it("returns null for empty or null header", () => {
@@ -29,31 +34,73 @@ describe("parseRetryAfter", () => {
 
 describe("computeRetryDelay", () => {
 	it("uses retry-after if provided with slight jitter", () => {
-		const delay = computeRetryDelay(0, 5000, () => 0.5);
+		const delay = computeRetryDelay(
+			0,
+			5000,
+			DEFAULT_BASE_RETRY_DELAY_MS,
+			DEFAULT_MAX_RETRY_DELAY_MS,
+			() => 0.5,
+		);
 		expect(delay).toBe(5000 + 0.5 * 250);
 	});
 
 	it("uses exponential backoff when retry-after is not provided", () => {
-		const delay0 = computeRetryDelay(0, null, () => 0);
-		expect(delay0).toBe(BASE_RETRY_DELAY_MS); // 1500 * 2^0 = 1500
+		const delay0 = computeRetryDelay(
+			0,
+			null,
+			DEFAULT_BASE_RETRY_DELAY_MS,
+			DEFAULT_MAX_RETRY_DELAY_MS,
+			() => 0,
+		);
+		expect(delay0).toBe(DEFAULT_BASE_RETRY_DELAY_MS); // 1500 * 2^0 = 1500
 
-		const delay1 = computeRetryDelay(1, null, () => 0);
-		expect(delay1).toBe(BASE_RETRY_DELAY_MS * 2); // 1500 * 2^1 = 3000
+		const delay1 = computeRetryDelay(
+			1,
+			null,
+			DEFAULT_BASE_RETRY_DELAY_MS,
+			DEFAULT_MAX_RETRY_DELAY_MS,
+			() => 0,
+		);
+		expect(delay1).toBe(DEFAULT_BASE_RETRY_DELAY_MS * 2); // 1500 * 2^1 = 3000
 
-		const delay2 = computeRetryDelay(2, null, () => 0);
-		expect(delay2).toBe(BASE_RETRY_DELAY_MS * 4); // 1500 * 2^2 = 6000
+		const delay2 = computeRetryDelay(
+			2,
+			null,
+			DEFAULT_BASE_RETRY_DELAY_MS,
+			DEFAULT_MAX_RETRY_DELAY_MS,
+			() => 0,
+		);
+		expect(delay2).toBe(DEFAULT_BASE_RETRY_DELAY_MS * 4); // 1500 * 2^2 = 6000
 	});
 
-	it("caps delay at MAX_RETRY_DELAY_MS", () => {
-		const delay = computeRetryDelay(10, null, () => 0);
-		expect(delay).toBe(MAX_RETRY_DELAY_MS);
+	it("caps delay at DEFAULT_MAX_RETRY_DELAY_MS", () => {
+		const delay = computeRetryDelay(
+			10,
+			null,
+			DEFAULT_BASE_RETRY_DELAY_MS,
+			DEFAULT_MAX_RETRY_DELAY_MS,
+			() => 0,
+		);
+		expect(delay).toBe(DEFAULT_MAX_RETRY_DELAY_MS);
 
-		const delayHuge = computeRetryDelay(0, 100000, () => 0);
-		expect(delayHuge).toBe(MAX_RETRY_DELAY_MS);
+		const delayHuge = computeRetryDelay(
+			0,
+			100000,
+			DEFAULT_BASE_RETRY_DELAY_MS,
+			DEFAULT_MAX_RETRY_DELAY_MS,
+			() => 0,
+		);
+		expect(delayHuge).toBe(DEFAULT_MAX_RETRY_DELAY_MS);
 	});
 
 	it("allows custom maxRetryDelayMs parameter so 60s Retry-After is not clamped to 30s", () => {
-		const delay60s = computeRetryDelay(0, 60000, 70000, BASE_RETRY_DELAY_MS, () => 0);
+		const delay60s = computeRetryDelay(
+			0,
+			60000,
+			DEFAULT_BASE_RETRY_DELAY_MS,
+			70000,
+			() => 0,
+		);
 		expect(delay60s).toBe(60000);
 	});
 });
