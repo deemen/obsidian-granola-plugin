@@ -51,4 +51,9 @@ describe("computeRetryDelay", () => {
 		const delayHuge = computeRetryDelay(0, 100000, () => 0);
 		expect(delayHuge).toBe(MAX_RETRY_DELAY_MS);
 	});
+
+	it("allows custom maxRetryDelayMs parameter so 60s Retry-After is not clamped to 30s", () => {
+		const delay60s = computeRetryDelay(0, 60000, 70000, BASE_RETRY_DELAY_MS, () => 0);
+		expect(delay60s).toBe(60000);
+	});
 });

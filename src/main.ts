@@ -16,6 +16,7 @@ import {
 	parseAccountInfo,
 	buildMeetingData,
 	excludeSelf,
+	type ParsedMeeting,
 	type ParsedMeetingDetails,
 	type MeetingData,
 } from "./response-parser";
@@ -33,12 +34,9 @@ import {
 import {
 	createInitialSyncProgress,
 	formatStatusBarText,
-	sleep,
 	type SyncProgressState,
 } from "./sync-progress";
 import DEFAULT_TRANSCRIPT_TEMPLATE from "./default-transcript-template.md";
-
-const TRANSCRIPT_FETCH_SPACING_MS = 65_000;
 
 export interface GranolaAccount {
 	id: string;
@@ -82,6 +80,7 @@ export default class GranolaSyncPlugin extends Plugin {
 	/** Folders created or confirmed during the current sync run. */
 	private ensuredFolders = new Set<string>();
 	private rateLimiter = new RateLimiter();
+	private transcriptRateLimiter = new RateLimiter({ baseIntervalMs: 65000 });
 
 	get isSyncActive(): boolean {
 		return this.isSyncing;
@@ -304,7 +303,7 @@ export default class GranolaSyncPlugin extends Plugin {
 				this.refreshSettingsTab();
 			}
 		});
-		const mcp = new GranolaMcpClient(auth, this.rateLimiter);
+		const mcp = new GranolaMcpClient(auth, this.rateLimiter, this.transcriptRateLimiter);
 		const runtime: AccountRuntime = { auth, mcp };
 		this.runtimes.set(account.id, runtime);
 		return runtime;
@@ -943,10 +942,17 @@ export default class GranolaSyncPlugin extends Plugin {
 			return true;
 		});
 
-		// Determine which meetings need transcripts
-		const meetingsToSyncTranscripts = this.settings.syncTranscripts
-			? listedMeetings.filter((m) => !ctx.existingTranscripts.has(m.id))
-			: [];
+		// Determine which meetings need transcripts (cache is the source of truth for downloads)
+		const meetingsToSyncTranscripts: ParsedMeeting[] = [];
+		if (this.settings.syncTranscripts) {
+			for (const m of listedMeetings) {
+				const hasInCache = await this.cacheStore.hasTranscript(m.id);
+				const hasInVault = ctx.existingTranscripts.has(m.id);
+				if (!hasInCache || !hasInVault) {
+					meetingsToSyncTranscripts.push(m);
+				}
+			}
+		}
 
 		const skipped = listedMeetings.length - meetingsToSyncNotes.length;
 
@@ -1080,7 +1086,6 @@ export default class GranolaSyncPlugin extends Plugin {
 		// ----------------------------------------------------
 		let transcriptsCreated = 0;
 		if (this.settings.syncTranscripts && meetingsToSyncTranscripts.length > 0) {
-			let networkTranscriptsCount = 0;
 			for (let i = 0; i < meetingsToSyncTranscripts.length; i++) {
 				if (ctx.signal.aborted) throw new DOMException("The operation was aborted", "AbortError");
 				const m = meetingsToSyncTranscripts[i];
@@ -1092,29 +1097,39 @@ export default class GranolaSyncPlugin extends Plugin {
 
 				let transcript = await this.cacheStore.getTranscript(m.id);
 				if (!transcript) {
-					// Enforce pacing between network transcript fetches (~65 seconds)
-					if (networkTranscriptsCount > 0) {
-						await sleep(TRANSCRIPT_FETCH_SPACING_MS, ctx.signal, (remainingSeconds) => {
-							this.notifyProgress({
-								phase: "transcripts",
-								current: i,
-								total: meetingsToSyncTranscripts.length,
-								countdownSeconds: remainingSeconds,
-								message: "",
-							});
-						});
-					}
-
 					this.notifyProgress({
 						phase: "transcripts",
-						current: i + 1,
+						current: i,
 						total: meetingsToSyncTranscripts.length,
+						countdownSeconds: undefined,
 						message: `Downloading transcript ${i + 1} of ${meetingsToSyncTranscripts.length}...`,
 					});
 
 					let rawTranscript = "";
 					try {
-						rawTranscript = await mcp.getTranscript(m.id, ctx.signal);
+						rawTranscript = await mcp.getTranscript(
+							m.id,
+							ctx.signal,
+							(remainingSeconds) => {
+								if (remainingSeconds > 0) {
+									this.notifyProgress({
+										phase: "transcripts",
+										current: i,
+										total: meetingsToSyncTranscripts.length,
+										countdownSeconds: remainingSeconds,
+										message: "",
+									});
+								} else {
+									this.notifyProgress({
+										phase: "transcripts",
+										current: i + 1,
+										total: meetingsToSyncTranscripts.length,
+										countdownSeconds: undefined,
+										message: `Downloading transcript ${i + 1} of ${meetingsToSyncTranscripts.length}...`,
+									});
+								}
+							},
+						);
 					} catch (error) {
 						if (this.isAbortError(error)) throw error;
 						console.error(`Granola: transcript fetch failed for ${m.id}`, error);
@@ -1126,7 +1141,6 @@ export default class GranolaSyncPlugin extends Plugin {
 						continue;
 					}
 					transcript = parsed;
-					networkTranscriptsCount++;
 					await this.cacheStore.saveTranscript(m.id, transcript);
 				}
 

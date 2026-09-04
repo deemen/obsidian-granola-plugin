@@ -85,10 +85,17 @@ export class GranolaMcpClient {
 	private client: Client | null = null;
 	private authProvider: GranolaAuthProvider;
 	private rateLimiter: RateLimiter;
+	private transcriptRateLimiter: RateLimiter;
 
-	constructor(authProvider: GranolaAuthProvider, rateLimiter = new RateLimiter()) {
+	constructor(
+		authProvider: GranolaAuthProvider,
+		rateLimiter = new RateLimiter(),
+		transcriptRateLimiter?: RateLimiter,
+	) {
 		this.authProvider = authProvider;
 		this.rateLimiter = rateLimiter;
+		this.transcriptRateLimiter =
+			transcriptRateLimiter ?? new RateLimiter({ baseIntervalMs: 65000 });
 	}
 
 	get isConnected(): boolean {
@@ -140,6 +147,7 @@ export class GranolaMcpClient {
 		signal?: AbortSignal,
 	): Promise<string> {
 		return this.callToolText(
+			this.rateLimiter,
 			"list_meetings",
 			buildListMeetingsArgs(timeRange, onlyMyMeetings),
 			2,
@@ -148,57 +156,79 @@ export class GranolaMcpClient {
 	}
 
 	async getMeetings(meetingIds: string[], signal?: AbortSignal): Promise<string> {
-		return this.callToolText("get_meetings", { meeting_ids: meetingIds }, 2, signal);
+		return this.callToolText(
+			this.rateLimiter,
+			"get_meetings",
+			{ meeting_ids: meetingIds },
+			2,
+			signal,
+		);
 	}
 
-	async getTranscript(meetingId: string, signal?: AbortSignal): Promise<string> {
-		return this.callToolText("get_meeting_transcript", { meeting_id: meetingId }, 2, signal);
+	async getTranscript(
+		meetingId: string,
+		signal?: AbortSignal,
+		onTick?: (remainingSeconds: number) => void,
+	): Promise<string> {
+		return this.callToolText(
+			this.transcriptRateLimiter,
+			"get_meeting_transcript",
+			{ meeting_id: meetingId },
+			2,
+			signal,
+			onTick,
+		);
 	}
 
 	async getAccountInfo(signal?: AbortSignal): Promise<string> {
-		return this.callToolText("get_account_info", {}, 2, signal);
+		return this.callToolText(this.rateLimiter, "get_account_info", {}, 2, signal);
 	}
 
 	private async callToolText(
+		limiter: RateLimiter,
 		name: string,
 		args: Record<string, unknown>,
 		retries = 2,
 		signal?: AbortSignal,
+		onTick?: (remainingSeconds: number) => void,
 	): Promise<string> {
 		if (signal?.aborted) {
 			throw new DOMException("The operation was aborted", "AbortError");
 		}
-		return this.rateLimiter.execute(async () => {
-			for (let attempt = 0; attempt <= retries; attempt++) {
-				if (signal?.aborted) {
-					throw new DOMException("The operation was aborted", "AbortError");
-				}
-				if (!this.client) {
-					throw new Error("Not connected to Granola");
-				}
-				const result = await this.client.callTool(
-					{ name, arguments: args },
-					undefined,
-					signal ? { signal } : undefined,
-				);
-				const text = (result.content as Array<{ type: string; text?: string }>)
-					.filter((c) => c.type === "text" && typeof c.text === "string")
-					.map((c) => c.text!)
-					.join("\n");
-
-				if (isTranscriptErrorResponse(text)) {
-					if (attempt < retries) {
-						const delay = 2000 * Math.pow(2, attempt);
-						this.rateLimiter.backoff(delay);
-						await sleep(delay, signal);
-						continue;
+		return limiter.execute(
+			async () => {
+				for (let attempt = 0; attempt <= retries; attempt++) {
+					if (signal?.aborted) {
+						throw new DOMException("The operation was aborted", "AbortError");
 					}
-					throw new Error(`Granola rate limit: ${text.trim()}`);
-				}
+					if (!this.client) {
+						throw new Error("Not connected to Granola");
+					}
+					const result = await this.client.callTool(
+						{ name, arguments: args },
+						undefined,
+						signal ? { signal } : undefined,
+					);
+					const text = (result.content as Array<{ type: string; text?: string }>)
+						.filter((c) => c.type === "text" && typeof c.text === "string")
+						.map((c) => c.text!)
+						.join("\n");
 
-				return text;
-			}
-			throw new Error("Tool execution failed after retries");
-		});
+					if (isTranscriptErrorResponse(text)) {
+						if (attempt < retries) {
+							limiter.backoff(attempt);
+							const delay = limiter.baseIntervalMs * Math.pow(2, attempt);
+							await sleep(delay, signal);
+							continue;
+						}
+						throw new Error(`Granola rate limit: ${text.trim()}`);
+					}
+
+					return text;
+				}
+				throw new Error("Tool execution failed after retries");
+			},
+			{ signal, onTick },
+		);
 	}
 }

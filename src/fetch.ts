@@ -9,7 +9,7 @@ import type { IncomingMessage } from "node:http";
 const MAX_REDIRECTS = 5;
 export const MAX_RETRIES = 3;
 export const BASE_RETRY_DELAY_MS = 1500;
-export const MAX_RETRY_DELAY_MS = 30000;
+export const MAX_RETRY_DELAY_MS = 70000;
 
 /**
  * Parse a Retry-After header into milliseconds.
@@ -31,28 +31,60 @@ export function parseRetryAfter(headerValue: string | null | undefined): number 
 	return null;
 }
 
+export interface RetryOptions {
+	maxRetries?: number;
+	baseRetryDelayMs?: number;
+	maxRetryDelayMs?: number;
+	randomFn?: () => number;
+}
+
 /**
  * Compute the delay for a retry attempt.
  */
-export function computeRetryDelay(attempt: number, retryAfterMs: number | null, randomFn = Math.random): number {
-	if (retryAfterMs !== null) {
-		return Math.min(retryAfterMs + randomFn() * 250, MAX_RETRY_DELAY_MS);
+export function computeRetryDelay(
+	attempt: number,
+	retryAfterMs: number | null,
+	randomFnOrMaxDelay: (() => number) | number = MAX_RETRY_DELAY_MS,
+	baseDelayMs = BASE_RETRY_DELAY_MS,
+	randomFn = Math.random,
+): number {
+	let effectiveMaxDelay = MAX_RETRY_DELAY_MS;
+	const effectiveBaseDelay = baseDelayMs;
+	let effectiveRandom = randomFn;
+
+	if (typeof randomFnOrMaxDelay === "function") {
+		effectiveRandom = randomFnOrMaxDelay;
+	} else if (typeof randomFnOrMaxDelay === "number") {
+		effectiveMaxDelay = randomFnOrMaxDelay;
 	}
-	const backoff = BASE_RETRY_DELAY_MS * Math.pow(2, attempt);
-	const jitter = randomFn() * 500;
-	return Math.min(backoff + jitter, MAX_RETRY_DELAY_MS);
+
+	if (retryAfterMs !== null) {
+		return Math.min(retryAfterMs + effectiveRandom() * 250, effectiveMaxDelay);
+	}
+	const backoff = effectiveBaseDelay * Math.pow(2, attempt);
+	const jitter = effectiveRandom() * 500;
+	return Math.min(backoff + jitter, effectiveMaxDelay);
 }
 
-export async function nodeFetch(input: string | URL, init?: RequestInit): Promise<Response> {
+export async function nodeFetch(
+	input: string | URL,
+	init?: RequestInit,
+	retryOptions?: RetryOptions,
+): Promise<Response> {
 	let attempt = 0;
+	const maxRetries = retryOptions?.maxRetries ?? MAX_RETRIES;
+	const maxDelay = retryOptions?.maxRetryDelayMs ?? MAX_RETRY_DELAY_MS;
+	const baseDelay = retryOptions?.baseRetryDelayMs ?? BASE_RETRY_DELAY_MS;
+	const randomFn = retryOptions?.randomFn ?? Math.random;
+
 	while (true) {
 		if (init?.signal?.aborted) {
 			throw new DOMException("The operation was aborted", "AbortError");
 		}
 		const response = await doFetch(input, init, 0);
-		if ((response.status === 429 || response.status === 503) && attempt < MAX_RETRIES) {
+		if ((response.status === 429 || response.status === 503) && attempt < maxRetries) {
 			const retryAfter = parseRetryAfter(response.headers.get("retry-after"));
-			const delay = computeRetryDelay(attempt, retryAfter);
+			const delay = computeRetryDelay(attempt, retryAfter, maxDelay, baseDelay, randomFn);
 			attempt++;
 			// Consume body so Node releases socket
 			await response.text().catch(() => {});

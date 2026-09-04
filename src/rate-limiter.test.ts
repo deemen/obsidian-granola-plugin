@@ -105,4 +105,95 @@ describe("RateLimiter", () => {
 		await vi.advanceTimersByTimeAsync(60);
 		expect(await p2).toBe("second ok");
 	});
+
+	it("persists pacing across start/stop/start cycles so a second sync within base interval waits", async () => {
+		const limiter = new RateLimiter({ baseIntervalMs: 65000 });
+
+		// Sync 1 runs and fetches an item
+		let firstRan = false;
+		await limiter.execute(async () => {
+			firstRan = true;
+		});
+		expect(firstRan).toBe(true);
+
+		// Now simulate 15 seconds passing (e.g. sync stopped and user clicks Sync now 15s later)
+		await vi.advanceTimersByTimeAsync(15000);
+
+		// Sync 2 starts
+		let secondRan = false;
+		const p2 = limiter.execute(async () => {
+			secondRan = true;
+		});
+
+		// At T=15s (only 15s elapsed out of 65s), p2 must NOT have run yet
+		await vi.advanceTimersByTimeAsync(0);
+		expect(secondRan).toBe(false);
+
+		// Advance 40s (total 55s, still not 65s)
+		await vi.advanceTimersByTimeAsync(40000);
+		expect(secondRan).toBe(false);
+
+		// Advance remaining 10s (total 65s)
+		await vi.advanceTimersByTimeAsync(10000);
+		await p2;
+		expect(secondRan).toBe(true);
+	});
+
+	it("calculates exponential backoff as a multiple of baseIntervalMs", async () => {
+		const limiter = new RateLimiter({ baseIntervalMs: 65000 });
+
+		let ran = false;
+		await limiter.execute(async () => {
+			ran = true;
+		});
+		expect(ran).toBe(true);
+
+		// Backoff attempt 0: should back off by 1x baseIntervalMs (65,000ms)
+		limiter.backoff(0);
+
+		let pAfterBackoffRan = false;
+		const p = limiter.execute(async () => {
+			pAfterBackoffRan = true;
+		});
+
+		// Advance 60s - should not run yet
+		await vi.advanceTimersByTimeAsync(60000);
+		expect(pAfterBackoffRan).toBe(false);
+
+		// Advance remaining 5s (total 65s)
+		await vi.advanceTimersByTimeAsync(5000);
+		await p;
+		expect(pAfterBackoffRan).toBe(true);
+	});
+
+	it("aborts waiting immediately when AbortSignal fires", async () => {
+		const limiter = new RateLimiter({ baseIntervalMs: 65000 });
+		await limiter.execute(async () => {});
+
+		const controller = new AbortController();
+		const p = limiter.execute(async () => "result", { signal: controller.signal });
+
+		// Abort after 2 seconds
+		await vi.advanceTimersByTimeAsync(2000);
+		controller.abort();
+
+		await expect(p).rejects.toThrow();
+	});
+
+	it("calls onTick with remaining seconds while waiting for pacing", async () => {
+		const limiter = new RateLimiter({ baseIntervalMs: 3000 });
+		await limiter.execute(async () => {});
+
+		const ticks: number[] = [];
+		const p = limiter.execute(async () => "done", {
+			onTick: (sec) => ticks.push(sec),
+		});
+
+		await vi.advanceTimersByTimeAsync(1000);
+		await vi.advanceTimersByTimeAsync(1000);
+		await vi.advanceTimersByTimeAsync(1000);
+		await p;
+
+		expect(ticks.length).toBeGreaterThan(0);
+	});
 });

@@ -273,7 +273,14 @@ export function parseTranscriptResponse(text: string): string {
 export function isTranscriptErrorResponse(text: string): boolean {
 	const normalized = text.trim().replace(/\s+/g, " ");
 	if (!normalized || normalized.length > 500) return false;
-	return /^(?:rate limit exceeded|too many requests|request rate limited|temporarily unavailable|service unavailable)(?:\b|[.:])/i.test(
+
+	// If the text contains recognized dialogue turns (e.g. Me:, Them:, Microphone:, Speaker:),
+	// it's dialogue content discussing rate limits rather than an API error response.
+	if (/(?:^|\n|\b)(?:\*\*)?(?:Me|Them|Microphone|Speaker)(?:\*\*)?:/i.test(text)) {
+		return false;
+	}
+
+	return /(?:rate limit|too many requests|request rate limited|slow down requests|quota exceeded|temporarily unavailable|service unavailable)/i.test(
 		normalized,
 	);
 }

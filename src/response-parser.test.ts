@@ -270,6 +270,15 @@ describe("isTranscriptErrorResponse", () => {
 		expect(isTranscriptErrorResponse("Service Unavailable")).toBe(true);
 	});
 
+	it("recognizes unanchored rate limit and error variants", () => {
+		expect(
+			isTranscriptErrorResponse("You have exceeded your rate limit. Please try again in 45 seconds."),
+		).toBe(true);
+		expect(isTranscriptErrorResponse("<error>rate limit exceeded</error>")).toBe(true);
+		expect(isTranscriptErrorResponse("Error: Too many requests")).toBe(true);
+		expect(isTranscriptErrorResponse("API quota exceeded")).toBe(true);
+	});
+
 	it("does not reject ordinary transcript text that discusses rate limits", () => {
 		expect(
 			isTranscriptErrorResponse(

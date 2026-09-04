@@ -1,4 +1,5 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import type { GranolaAuthProvider } from "./auth";
 import { buildListMeetingsArgs } from "./mcp-client";
 
 describe("buildListMeetingsArgs", () => {
@@ -61,3 +62,103 @@ describe("buildListMeetingsArgs", () => {
 		});
 	});
 });
+
+describe("GranolaMcpClient rate limiting", () => {
+	beforeEach(() => {
+		vi.useFakeTimers();
+	});
+
+	afterEach(() => {
+		vi.useRealTimers();
+	});
+
+	it("uses separate rate limiters for meetings and transcripts and passes onTick", async () => {
+		const { GranolaMcpClient } = await import("./mcp-client");
+		const { RateLimiter } = await import("./rate-limiter");
+
+		const meetingLimiter = new RateLimiter(100);
+		const transcriptLimiter = new RateLimiter(5000);
+
+		const mockAuth = {
+			redirectUrl: "",
+			clientMetadata: {} as never,
+			state: async () => "",
+			tokens: async () => undefined,
+			saveTokens: async () => {},
+			clientInformation: async () => undefined,
+		};
+		const client = new GranolaMcpClient(
+			mockAuth as unknown as GranolaAuthProvider,
+			meetingLimiter,
+			transcriptLimiter,
+		);
+
+		// Mock internal MCP client
+		const mockClient = {
+			callTool: async () => ({
+				content: [{ type: "text", text: "Speaker: hello" }],
+			}),
+		};
+		(client as unknown as { client: typeof mockClient }).client = mockClient;
+
+		const ticks: number[] = [];
+		// Prime transcript limiter
+		await transcriptLimiter.execute(async () => {});
+
+		const p = client.getTranscript("m1", undefined, (sec) => ticks.push(sec));
+		// Advance time slightly to ensure execution
+		await vi.advanceTimersByTimeAsync(5000);
+		const res = await p;
+
+		expect(res).toBe("Speaker: hello");
+		expect(ticks.length).toBeGreaterThan(0);
+	});
+
+	it("triggers backoff on transcriptRateLimiter when rate limit error text is returned", async () => {
+		const { GranolaMcpClient } = await import("./mcp-client");
+		const { RateLimiter } = await import("./rate-limiter");
+
+		const meetingLimiter = new RateLimiter(100);
+		const transcriptLimiter = new RateLimiter(1000);
+		const backoffSpy = vi.spyOn(transcriptLimiter, "backoff");
+
+		const mockAuth = {
+			redirectUrl: "",
+			clientMetadata: {} as never,
+			state: async () => "",
+			tokens: async () => undefined,
+			saveTokens: async () => {},
+			clientInformation: async () => undefined,
+		};
+		const client = new GranolaMcpClient(
+			mockAuth as unknown as GranolaAuthProvider,
+			meetingLimiter,
+			transcriptLimiter,
+		);
+
+		let callCount = 0;
+		const mockClient = {
+			callTool: async () => {
+				callCount++;
+				if (callCount === 1) {
+					return {
+						content: [{ type: "text", text: "Rate limit exceeded. Please slow down requests." }],
+					};
+				}
+				return {
+					content: [{ type: "text", text: "Speaker: second attempt success" }],
+				};
+			},
+		};
+		(client as unknown as { client: typeof mockClient }).client = mockClient;
+
+		const p = client.getTranscript("m1");
+		// Advance by backoff delay (1000 * 2^0 = 1000ms)
+		await vi.advanceTimersByTimeAsync(1100);
+		const res = await p;
+
+		expect(res).toBe("Speaker: second attempt success");
+		expect(backoffSpy).toHaveBeenCalledWith(0);
+	});
+});
+
