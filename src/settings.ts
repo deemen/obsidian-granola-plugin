@@ -30,6 +30,10 @@ const SYNC_TIME_RANGE_OPTIONS: Record<SyncTimeRange, string> = {
 	this_week: "This week",
 	last_week: "Last week",
 	last_30_days: "Last 30 days",
+	last_90_days: "Last 90 days",
+	last_180_days: "Last 180 days",
+	last_1_year: "Last 1 year",
+	all_time: "All time",
 };
 
 export interface GranolaSyncSettings {
@@ -177,7 +181,7 @@ export class GranolaSyncSettingTab extends PluginSettingTab {
 				},
 				{
 					name: "Time range",
-					desc: "How far back to look for meetings when syncing",
+					desc: "How far back to look for meetings when syncing. Note: Granola Free plans only allow querying notes from the last 30 days.",
 					control: {
 						type: "dropdown",
 						key: "syncTimeRange",

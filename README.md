@@ -52,7 +52,7 @@ To sync more than one Granola account, click **Add Granola account** in settings
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| Time range | Last 30 days | How far back to look for meetings |
+| Time range | Last 30 days | How far back to look for meetings. Options: This week, Last week, Last 30 days, Last 90 days, Last 180 days, Last 1 year, All time. (Note: Granola Free plans restrict history to 30 days) |
 | Sync frequency | Every 15 minutes | How often to sync. Options: Manual only, On startup, 1m, 15m, 30m, 60m, 12h |
 | Only my meetings | On | Sync only meetings you recorded or were listed as a participant in, including notes shared with you. Turn off to also sync every workspace-visible meeting |
 | Sync transcripts | Off | Include full meeting transcripts (1 extra API call per meeting) |

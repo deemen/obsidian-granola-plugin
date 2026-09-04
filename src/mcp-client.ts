@@ -5,7 +5,21 @@ import { nodeFetch } from "./fetch";
 
 const MCP_SERVER_URL = "https://mcp.granola.ai/mcp";
 
-export type SyncTimeRange = "this_week" | "last_week" | "last_30_days";
+export type SyncTimeRange =
+	| "this_week"
+	| "last_week"
+	| "last_30_days"
+	| "last_90_days"
+	| "last_180_days"
+	| "last_1_year"
+	| "all_time";
+
+function formatDateIso(d: Date): string {
+	const year = d.getFullYear();
+	const month = String(d.getMonth() + 1).padStart(2, "0");
+	const day = String(d.getDate()).padStart(2, "0");
+	return `${year}-${month}-${day}`;
+}
 
 /**
  * Build the list_meetings arguments.
@@ -19,12 +33,45 @@ export type SyncTimeRange = "this_week" | "last_week" | "last_30_days";
  *
  * `workspace_only` is deliberately never sent: it is an AND filter that
  * would restrict the results to workspace-visible meetings only.
+ *
+ * For ranges beyond 30 days, Granola's "custom" time_range is used with
+ * custom_start and custom_end in ISO format.
  */
 export function buildListMeetingsArgs(
 	timeRange: SyncTimeRange,
 	onlyMyMeetings: boolean,
+	now: Date = new Date(),
 ): Record<string, unknown> {
-	const args: Record<string, unknown> = { time_range: timeRange };
+	const args: Record<string, unknown> = {};
+
+	if (timeRange === "this_week" || timeRange === "last_week" || timeRange === "last_30_days") {
+		args.time_range = timeRange;
+	} else {
+		args.time_range = "custom";
+		const end = formatDateIso(now);
+		let start: string;
+
+		if (timeRange === "last_90_days") {
+			const d = new Date(now.getTime());
+			d.setDate(d.getDate() - 90);
+			start = formatDateIso(d);
+		} else if (timeRange === "last_180_days") {
+			const d = new Date(now.getTime());
+			d.setDate(d.getDate() - 180);
+			start = formatDateIso(d);
+		} else if (timeRange === "last_1_year") {
+			const d = new Date(now.getTime());
+			d.setDate(d.getDate() - 365);
+			start = formatDateIso(d);
+		} else {
+			// all_time: Granola launched in 2023, 2020-01-01 safely covers all possible meetings
+			start = "2020-01-01";
+		}
+
+		args.custom_start = start;
+		args.custom_end = end;
+	}
+
 	if (onlyMyMeetings) {
 		args.involvement = { captured_by_me: true, listed_as_participant: true };
 	}
