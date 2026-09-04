@@ -13,12 +13,27 @@ import { RateLimiter } from "./rate-limiter";
 import {
 	parseMeetingsResponse,
 	parseTranscriptResponse,
-	extractStoredTranscript,
 	parseAccountInfo,
 	buildMeetingData,
 	excludeSelf,
+	type ParsedMeetingDetails,
 } from "./response-parser";
-import { loadTemplate, applyTemplate, getFolderBasePath, resolveNotePath } from "./template";
+import {
+	loadTemplate,
+	applyTemplate,
+	getFolderBasePath,
+	resolveNotePath,
+	resolveTranscriptPath,
+} from "./template";
+import {
+	createInitialSyncProgress,
+	formatStatusBarText,
+	sleep,
+	type SyncProgressState,
+} from "./sync-progress";
+import DEFAULT_TRANSCRIPT_TEMPLATE from "./default-transcript-template.md";
+
+const TRANSCRIPT_FETCH_SPACING_MS = 65_000;
 
 export interface GranolaAccount {
 	id: string;
@@ -49,6 +64,10 @@ export default class GranolaSyncPlugin extends Plugin {
 	accounts: GranolaAccount[] = [];
 	private pluginData: PluginData = { ...DEFAULT_SETTINGS };
 	private isSyncing = false;
+	private syncAbortController: AbortController | null = null;
+	private statusBarItemEl: HTMLElement | null = null;
+	private progressState: SyncProgressState = createInitialSyncProgress();
+	private progressListeners = new Set<(state: SyncProgressState) => void>();
 	private syncIntervalId: number | null = null;
 	private ribbonIconEl: HTMLElement | null = null;
 	private settingTab: GranolaSyncSettingTab | null = null;
@@ -58,8 +77,67 @@ export default class GranolaSyncPlugin extends Plugin {
 	private ensuredFolders = new Set<string>();
 	private rateLimiter = new RateLimiter();
 
+	get isSyncActive(): boolean {
+		return this.isSyncing;
+	}
+
+	get currentSyncProgress(): SyncProgressState {
+		return this.progressState;
+	}
+
+	onProgress(listener: (state: SyncProgressState) => void): () => void {
+		this.progressListeners.add(listener);
+		listener(this.progressState);
+		return () => {
+			this.progressListeners.delete(listener);
+		};
+	}
+
+	notifyProgress(state: SyncProgressState): void {
+		this.progressState = state;
+		this.updateStatusBar();
+		for (const listener of this.progressListeners) {
+			try {
+				listener(state);
+			} catch (e) {
+				console.error("Granola: error in progress listener", e);
+			}
+		}
+	}
+
+	private updateStatusBar(): void {
+		if (!this.statusBarItemEl) return;
+		const text = formatStatusBarText(this.progressState);
+		this.statusBarItemEl.setText(text);
+		this.statusBarItemEl.style.display = text ? "inline-block" : "none";
+	}
+
+	cancelSync(): void {
+		if (this.syncAbortController && !this.syncAbortController.signal.aborted) {
+			this.notifyProgress({
+				...this.progressState,
+				phase: "stopping",
+				message: "Stopping sync...",
+			});
+			this.syncAbortController.abort();
+			new Notice("Stopping Granola sync...");
+		}
+	}
+
+	private isAbortError(error: unknown): boolean {
+		return (
+			(error instanceof DOMException && error.name === "AbortError") ||
+			(error instanceof Error &&
+				(error.name === "AbortError" || error.message.toLowerCase().includes("abort")))
+		);
+	}
+
 	override async onload(): Promise<void> {
 		await this.loadSettings();
+
+		// Create status bar element
+		this.statusBarItemEl = this.addStatusBarItem();
+		this.updateStatusBar();
 
 		// Register OAuth callback handler
 		this.registerObsidianProtocolHandler("granola-auth", (params) => {
@@ -106,19 +184,29 @@ export default class GranolaSyncPlugin extends Plugin {
 
 	/**
 	 * Runs once, when the user first enables the plugin. Write the default
-	 * template now rather than leaving it to the first sync: the template path
-	 * setting is a file picker, so it can only offer a file that already exists.
-	 * Sync still creates one on demand, which covers the file being deleted later.
+	 * templates now rather than leaving it to the first sync.
 	 */
 	override onUserEnable(): void {
 		void loadTemplate(this.app, this.settings.templatePath).catch((error: unknown) => {
 			console.error("Granola: failed to create the default template", error);
+		});
+		void loadTemplate(
+			this.app,
+			this.settings.transcriptTemplatePath,
+			DEFAULT_TRANSCRIPT_TEMPLATE,
+		).catch((error: unknown) => {
+			console.error("Granola: failed to create default transcript template", error);
 		});
 	}
 
 	override onunload(): void {
 		this.clearSyncInterval();
 		this.rateLimiter.reset();
+		if (this.syncAbortController) {
+			this.syncAbortController.abort();
+			this.syncAbortController = null;
+		}
+		this.progressListeners.clear();
 		for (const runtime of this.runtimes.values()) {
 			void runtime.mcp.disconnect();
 		}
@@ -385,17 +473,33 @@ export default class GranolaSyncPlugin extends Plugin {
 	async syncMeetings(manual = false): Promise<void> {
 		if (this.isSyncing) return;
 		this.isSyncing = true;
+		this.syncAbortController = new AbortController();
 		// Folders can be deleted between runs, so never trust the last run's memo.
 		this.ensuredFolders.clear();
 
 		try {
-			await this.doSync(manual);
+			await this.doSync(manual, this.syncAbortController.signal);
+		} catch (error) {
+			if (this.isAbortError(error)) {
+				if (manual) new Notice("Granola sync stopped");
+			} else {
+				console.error("Granola: sync error", error);
+				if (manual) {
+					new Notice(
+						`Granola sync error: ${error instanceof Error ? error.message : "Unknown error"}`,
+					);
+				}
+			}
 		} finally {
 			this.isSyncing = false;
+			this.syncAbortController = null;
+			this.notifyProgress(createInitialSyncProgress());
 		}
 	}
 
-	private async doSync(manual: boolean): Promise<void> {
+	private async doSync(manual: boolean, signal: AbortSignal): Promise<void> {
+		if (signal.aborted) throw new DOMException("The operation was aborted", "AbortError");
+
 		const connectedAccounts = this.accounts.filter((a) => a.oauthTokens !== undefined);
 		if (connectedAccounts.length === 0) {
 			if (manual) {
@@ -404,27 +508,45 @@ export default class GranolaSyncPlugin extends Plugin {
 			return;
 		}
 
+		this.notifyProgress({
+			phase: "listing",
+			current: 0,
+			total: 0,
+			message: "Checking for meetings in Granola...",
+		});
+
 		const folderPathSetting = this.settings.folderPath || DEFAULT_SETTINGS.folderPath;
 		const templatePath = this.settings.templatePath || DEFAULT_SETTINGS.templatePath;
 		const filenamePattern = this.settings.filenamePattern || DEFAULT_SETTINGS.filenamePattern;
 
-		// Load template
+		const transcriptFolderSetting =
+			this.settings.transcriptFolder || DEFAULT_SETTINGS.transcriptFolder;
+		const transcriptFilenamePattern =
+			this.settings.transcriptFilenamePattern || DEFAULT_SETTINGS.transcriptFilenamePattern;
+		const transcriptTemplatePath =
+			this.settings.transcriptTemplatePath || DEFAULT_SETTINGS.transcriptTemplatePath;
+
+		// Load templates
 		let template: string;
+		let transcriptTemplate = "";
 		try {
 			template = await loadTemplate(this.app, templatePath);
+			if (this.settings.syncTranscripts) {
+				transcriptTemplate = await loadTemplate(
+					this.app,
+					transcriptTemplatePath,
+					DEFAULT_TRANSCRIPT_TEMPLATE,
+				);
+			}
 		} catch (error) {
 			const message = error instanceof Error ? error.message : "Unknown error";
 			new Notice(`Error loading template: ${message}`);
 			return;
 		}
 
-		// Create the fixed part of the folder pattern up front, so a folder problem
-		// is reported once here rather than per meeting — the dated subfolders below
-		// are created lazily as meetings land in them.
+		if (signal.aborted) throw new DOMException("The operation was aborted", "AbortError");
+
 		const folderPathPattern = normalizePath(folderPathSetting);
-		// "" when the pattern is all date tokens (`{date:YYYY/MM}`): notes are filed
-		// from the vault root down, so there is no static folder to pre-create and no
-		// folder narrower than the vault for the scan below to prefer.
 		const folderBasePath = getFolderBasePath(folderPathPattern);
 		try {
 			await this.ensureFolderExists(folderBasePath);
@@ -435,16 +557,24 @@ export default class GranolaSyncPlugin extends Plugin {
 		}
 
 		// Build map of existing granola_id -> file (shared across all accounts).
-		// Searched vault-wide: granola_id is ours, so a note moved out of the sync
-		// folder is still recognized and updated rather than duplicated. Sync folder
-		// first, so its copy wins if the same meeting exists in two places.
+		// Notes with type: transcript go to existingTranscripts; others go to existingDocs.
 		const existingDocs = new Map<string, TFile>();
+		const existingTranscripts = new Map<string, TFile>();
 		const files = this.app.vault.getMarkdownFiles();
 		for (const file of syncFolderFirst(files, folderBasePath)) {
 			const fileCache = this.app.metadataCache.getFileCache(file);
 			const granolaId = fileCache?.frontmatter?.granola_id as string | undefined;
-			if (granolaId && !existingDocs.has(granolaId)) {
-				existingDocs.set(granolaId, file);
+			const type = fileCache?.frontmatter?.type as string | undefined;
+			if (granolaId) {
+				if (type === "transcript") {
+					if (!existingTranscripts.has(granolaId)) {
+						existingTranscripts.set(granolaId, file);
+					}
+				} else {
+					if (!existingDocs.has(granolaId)) {
+						existingDocs.set(granolaId, file);
+					}
+				}
 			}
 		}
 
@@ -468,36 +598,49 @@ export default class GranolaSyncPlugin extends Plugin {
 
 		const ctx: SyncContext = {
 			template,
+			transcriptTemplate,
 			folderPathPattern,
 			filenamePattern,
+			transcriptFolderPattern: transcriptFolderSetting,
+			transcriptFilenamePattern,
 			existingDocs,
+			existingTranscripts,
 			emailToNoteTitle,
+			signal,
 		};
 
 		let created = 0;
 		let updated = 0;
 		let skipped = 0;
+		let transcriptsCreated = 0;
 		let failedAccounts = 0;
 
 		for (const account of connectedAccounts) {
+			if (signal.aborted) throw new DOMException("The operation was aborted", "AbortError");
 			try {
 				const result = await this.syncAccount(account, ctx);
 				created += result.created;
 				updated += result.updated;
 				skipped += result.skipped;
+				transcriptsCreated += result.transcriptsCreated;
 			} catch (error) {
+				if (this.isAbortError(error)) throw error;
 				failedAccounts++;
 				console.error(`Granola: sync failed for account ${account.label ?? account.id}`, error);
 			}
 		}
 
 		if (manual) {
-			const accountSuffix = connectedAccounts.length > 1 ? ` across ${connectedAccounts.length} accounts` : "";
+			const accountSuffix =
+				connectedAccounts.length > 1 ? ` across ${connectedAccounts.length} accounts` : "";
 			let message: string;
 			if (this.settings.skipExistingNotes) {
 				message = `Synced ${created} new meeting${created !== 1 ? "s" : ""} (${skipped} skipped)${accountSuffix}`;
 			} else {
 				message = `Synced ${created} new, ${updated} updated meeting${created + updated !== 1 ? "s" : ""}${accountSuffix}`;
+			}
+			if (transcriptsCreated > 0) {
+				message += `, ${transcriptsCreated} transcript${transcriptsCreated !== 1 ? "s" : ""}`;
 			}
 			if (failedAccounts > 0) {
 				message += `. ${failedAccounts} account${failedAccounts !== 1 ? "s" : ""} failed — check console.`;
@@ -532,6 +675,7 @@ export default class GranolaSyncPlugin extends Plugin {
 
 	/** Sync a single account into the shared folder, mutating ctx.existingDocs. */
 	private async syncAccount(account: GranolaAccount, ctx: SyncContext): Promise<SyncResult> {
+		if (ctx.signal.aborted) throw new DOMException("The operation was aborted", "AbortError");
 		const { mcp } = this.getRuntime(account);
 
 		if (!mcp.isConnected) {
@@ -549,7 +693,7 @@ export default class GranolaSyncPlugin extends Plugin {
 		// connected before labels existed, or where the initial fetch failed).
 		if (!account.label || !account.email) {
 			try {
-				const { label, email } = parseAccountInfo(await mcp.getAccountInfo());
+				const { label, email } = parseAccountInfo(await mcp.getAccountInfo(ctx.signal));
 				if (label || email) {
 					if (label) account.label = label;
 					if (email) account.email = email;
@@ -557,18 +701,28 @@ export default class GranolaSyncPlugin extends Plugin {
 					this.refreshSettingsTab();
 				}
 			} catch (error) {
+				if (this.isAbortError(error)) throw error;
 				console.error("Granola: failed to backfill account name", error);
 			}
 		}
 
 		// List meetings
+		this.notifyProgress({
+			phase: "listing",
+			current: 0,
+			total: 0,
+			message: `Checking meetings for ${account.label ?? account.id}...`,
+		});
+
 		let listResponse: string;
 		try {
 			listResponse = await mcp.listMeetings(
 				this.settings.syncTimeRange,
 				this.settings.onlyMyMeetings,
+				ctx.signal,
 			);
 		} catch (error) {
+			if (this.isAbortError(error)) throw error;
 			// Disconnect so we retry connection next time
 			await mcp.disconnect();
 			throw error;
@@ -576,31 +730,45 @@ export default class GranolaSyncPlugin extends Plugin {
 
 		const listedMeetings = parseMeetingsResponse(listResponse);
 		if (listedMeetings.length === 0) {
-			return { created: 0, updated: 0, skipped: 0 };
+			return { created: 0, updated: 0, skipped: 0, transcriptsCreated: 0 };
 		}
 
-		// Filter to meetings that need syncing
-		const meetingsToSync = listedMeetings.filter((m) => {
+		// Determine which meetings need note creation/update
+		const meetingsToSyncNotes = listedMeetings.filter((m) => {
 			if (this.settings.skipExistingNotes && ctx.existingDocs.has(m.id)) {
 				return false;
 			}
 			return true;
 		});
 
-		const skipped = listedMeetings.length - meetingsToSync.length;
-		if (meetingsToSync.length === 0) {
-			return { created: 0, updated: 0, skipped };
-		}
+		// Determine which meetings need transcripts
+		const meetingsToSyncTranscripts = this.settings.syncTranscripts
+			? listedMeetings.filter((m) => !ctx.existingTranscripts.has(m.id))
+			: [];
 
-		// Batch fetch meeting details (max 10 per API call)
-		const idsToFetch = meetingsToSync.map((m) => m.id);
-		const allDetails = [];
+		const skipped = listedMeetings.length - meetingsToSyncNotes.length;
+
+		// We need details for any meeting that either needs a note update OR needs a transcript
+		const neededIdsSet = new Set<string>();
+		for (const m of meetingsToSyncNotes) neededIdsSet.add(m.id);
+		for (const m of meetingsToSyncTranscripts) neededIdsSet.add(m.id);
+
+		const idsToFetch = Array.from(neededIdsSet);
+		const allDetails: ParsedMeetingDetails[] = [];
+		const detailsMap = new Map<string, ParsedMeetingDetails>();
+
 		for (let i = 0; i < idsToFetch.length; i += 10) {
+			if (ctx.signal.aborted) throw new DOMException("The operation was aborted", "AbortError");
 			const batch = idsToFetch.slice(i, i + 10);
 			try {
-				const detailsResponse = await mcp.getMeetings(batch);
-				allDetails.push(...parseMeetingsResponse(detailsResponse));
+				const detailsResponse = await mcp.getMeetings(batch, ctx.signal);
+				const parsed = parseMeetingsResponse(detailsResponse);
+				allDetails.push(...parsed);
+				for (const item of parsed) {
+					detailsMap.set(item.id, item);
+				}
 			} catch (error) {
+				if (this.isAbortError(error)) throw error;
 				console.error("Granola: getMeetings batch failed", error);
 			}
 		}
@@ -608,79 +776,185 @@ export default class GranolaSyncPlugin extends Plugin {
 		let created = 0;
 		let updated = 0;
 
-		for (const details of allDetails) {
+		// ----------------------------------------------------
+		// PHASE 1: Sync Meeting Notes
+		// ----------------------------------------------------
+		const noteTargetDetails = allDetails.filter((d) =>
+			meetingsToSyncNotes.some((m) => m.id === d.id),
+		);
+
+		for (let i = 0; i < noteTargetDetails.length; i++) {
+			if (ctx.signal.aborted) throw new DOMException("The operation was aborted", "AbortError");
+			const details = noteTargetDetails[i];
 			try {
 				// Skip meetings still in progress (no summary generated yet)
 				if (!details.summary.trim() || details.summary.trim() === "No summary") {
 					continue;
 				}
 
-				const existingFile = ctx.existingDocs.get(details.id);
+				this.notifyProgress({
+					phase: "meetings",
+					current: i + 1,
+					total: noteTargetDetails.length,
+					message: `Saving meeting ${i + 1} of ${noteTargetDetails.length}...`,
+				});
 
-				// Optionally fetch transcript
-				let transcript = "";
-				if (this.settings.syncTranscripts) {
-					// Reuse valid stored transcript to avoid redundant API calls
-					if (existingFile) {
-						transcript = extractStoredTranscript(await this.app.vault.read(existingFile));
-					}
-
-					if (!transcript) {
-						try {
-							const transcriptResponse = await mcp.getTranscript(details.id);
-							transcript = parseTranscriptResponse(transcriptResponse);
-						} catch (error) {
-							console.error(`Granola: transcript fetch failed for ${details.id}`, error);
-							// Never replace an existing note if transcript was requested but failed
-							if (existingFile) continue;
-						}
-					}
-
-					if (!transcript && existingFile) continue;
-				}
-
-				const meetingData = buildMeetingData(details, transcript);
+				const meetingData = buildMeetingData(details, "");
 				if (this.settings.excludeSelfFromAttendees && account.email) {
 					meetingData.participants = excludeSelf(meetingData.participants, account.email);
 				}
-				const content = applyTemplate(ctx.template, meetingData, ctx.emailToNoteTitle);
+
+				const existingFile = ctx.existingDocs.get(details.id);
+				const meetingPathInfo = resolveNotePath(
+					ctx.folderPathPattern,
+					ctx.filenamePattern,
+					meetingData,
+				);
+				const transcriptPathInfo = resolveTranscriptPath(
+					ctx.transcriptFolderPattern,
+					ctx.transcriptFilenamePattern,
+					meetingData,
+					meetingPathInfo.folder,
+					meetingPathInfo.filename,
+				);
+
+				const content = applyTemplate(ctx.template, meetingData, ctx.emailToNoteTitle, {
+					granola_meeting_transcript: transcriptPathInfo.filename,
+				});
 
 				if (existingFile) {
 					await this.app.vault.modify(existingFile, content);
 					updated++;
 				} else {
-					const { folder, path } = resolveNotePath(
-						ctx.folderPathPattern,
-						ctx.filenamePattern,
-						meetingData,
-					);
-					await this.ensureFolderExists(folder);
-					const newFile = await this.app.vault.create(path, content);
+					await this.ensureFolderExists(meetingPathInfo.folder);
+					const newFile = await this.app.vault.create(meetingPathInfo.path, content);
 					// Track so a meeting shared across accounts isn't created twice this run.
 					ctx.existingDocs.set(details.id, newFile);
 					created++;
 				}
 			} catch (error) {
+				if (this.isAbortError(error)) throw error;
 				console.error(`Error syncing meeting ${details.id}:`, error);
 			}
 		}
 
-		return { created, updated, skipped };
+		// ----------------------------------------------------
+		// PHASE 2: Sync Transcripts (Separated & Paced)
+		// ----------------------------------------------------
+		let transcriptsCreated = 0;
+		if (this.settings.syncTranscripts && meetingsToSyncTranscripts.length > 0) {
+			for (let i = 0; i < meetingsToSyncTranscripts.length; i++) {
+				if (ctx.signal.aborted) throw new DOMException("The operation was aborted", "AbortError");
+				const m = meetingsToSyncTranscripts[i];
+				const details = detailsMap.get(m.id);
+				// If no details or no summary, meeting may still be in progress
+				if (!details || !details.summary.trim() || details.summary.trim() === "No summary") {
+					continue;
+				}
+
+				// Enforce pacing between transcript fetches (~65 seconds)
+				if (i > 0) {
+					await sleep(TRANSCRIPT_FETCH_SPACING_MS, ctx.signal, (remainingSeconds) => {
+						this.notifyProgress({
+							phase: "transcripts",
+							current: i,
+							total: meetingsToSyncTranscripts.length,
+							countdownSeconds: remainingSeconds,
+							message: "",
+						});
+					});
+				}
+
+				this.notifyProgress({
+					phase: "transcripts",
+					current: i + 1,
+					total: meetingsToSyncTranscripts.length,
+					message: `Downloading transcript ${i + 1} of ${meetingsToSyncTranscripts.length}...`,
+				});
+
+				let rawTranscript = "";
+				try {
+					rawTranscript = await mcp.getTranscript(m.id, ctx.signal);
+				} catch (error) {
+					if (this.isAbortError(error)) throw error;
+					console.error(`Granola: transcript fetch failed for ${m.id}`, error);
+					continue;
+				}
+
+				const transcript = parseTranscriptResponse(rawTranscript);
+				if (!transcript) {
+					continue;
+				}
+
+				try {
+					const meetingData = buildMeetingData(details, transcript);
+					if (this.settings.excludeSelfFromAttendees && account.email) {
+						meetingData.participants = excludeSelf(meetingData.participants, account.email);
+					}
+
+					const meetingPathInfo = resolveNotePath(
+						ctx.folderPathPattern,
+						ctx.filenamePattern,
+						meetingData,
+					);
+					const transcriptPathInfo = resolveTranscriptPath(
+						ctx.transcriptFolderPattern,
+						ctx.transcriptFilenamePattern,
+						meetingData,
+						meetingPathInfo.folder,
+						meetingPathInfo.filename,
+					);
+
+					const transcriptContent = applyTemplate(
+						ctx.transcriptTemplate,
+						meetingData,
+						ctx.emailToNoteTitle,
+						{
+							granola_meeting_note: meetingPathInfo.filename,
+						},
+					);
+
+					await this.ensureFolderExists(transcriptPathInfo.folder);
+					const existingTranscriptFile = ctx.existingTranscripts.get(m.id);
+					if (existingTranscriptFile) {
+						await this.app.vault.modify(existingTranscriptFile, transcriptContent);
+					} else {
+						const newTranscriptFile = await this.app.vault.create(
+							transcriptPathInfo.path,
+							transcriptContent,
+						);
+						ctx.existingTranscripts.set(m.id, newTranscriptFile);
+					}
+					transcriptsCreated++;
+				} catch (error) {
+					if (this.isAbortError(error)) throw error;
+					console.error(`Error saving transcript note ${m.id}:`, error);
+				}
+			}
+		}
+
+		return { created, updated, skipped, transcriptsCreated };
 	}
 }
 
 interface SyncContext {
 	template: string;
+	transcriptTemplate: string;
 	folderPathPattern: string;
 	filenamePattern: string;
+	transcriptFolderPattern: string;
+	transcriptFilenamePattern: string;
 	existingDocs: Map<string, TFile>;
+	existingTranscripts: Map<string, TFile>;
 	emailToNoteTitle: Map<string, string>;
+	signal: AbortSignal;
 }
 
 interface SyncResult {
 	created: number;
 	updated: number;
 	skipped: number;
+	transcriptsCreated: number;
 }
 
 function generateAccountId(): string {

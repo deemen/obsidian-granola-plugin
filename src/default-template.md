@@ -3,6 +3,10 @@ granola_id: {{granola_id}}
 granola_url: {{granola_url}}
 title: "{{granola_title}}"
 date: {{granola_date}}
+type: meeting
+{{#granola_meeting_transcript}}
+meeting_transcript: "[[{{granola_meeting_transcript}}]]"
+{{/granola_meeting_transcript}}
 attendees:
 {{granola_attendees_linked_list}}
 tags:
@@ -17,9 +21,3 @@ tags:
 
 {{granola_enhanced_notes}}
 {{/granola_enhanced_notes}}
-{{#granola_transcript}}
-
-## Transcript
-
-{{granola_transcript}}
-{{/granola_transcript}}

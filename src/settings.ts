@@ -1,8 +1,9 @@
-import { App, PluginSettingTab } from "obsidian";
+import { App, ButtonComponent, PluginSettingTab } from "obsidian";
 import type { SettingDefinitionItem, SettingGroupItem } from "obsidian";
 import type GranolaSyncPlugin from "./main";
 import type { GranolaAccount } from "./main";
 import type { SyncTimeRange } from "./mcp-client";
+import { formatProgressMessage, type SyncProgressState } from "./sync-progress";
 
 export type SyncFrequency = "manual" | "startup" | "1m" | "15m" | "30m" | "60m" | "12h";
 
@@ -48,6 +49,9 @@ export interface GranolaSyncSettings {
 	syncTimeRange: SyncTimeRange;
 	syncTranscripts: boolean;
 	onlyMyMeetings: boolean;
+	transcriptFolder: string;
+	transcriptFilenamePattern: string;
+	transcriptTemplatePath: string;
 }
 
 export const DEFAULT_SETTINGS: GranolaSyncSettings = {
@@ -62,16 +66,28 @@ export const DEFAULT_SETTINGS: GranolaSyncSettings = {
 	syncTimeRange: "last_30_days",
 	syncTranscripts: false,
 	onlyMyMeetings: true,
+	transcriptFolder: "{meeting_folder}/Transcripts",
+	transcriptFilenamePattern: "{filename} (Transcript)",
+	transcriptTemplatePath: "Templates/Granola Transcript.md",
 };
 
 type SettingKey = keyof GranolaSyncSettings;
 
 export class GranolaSyncSettingTab extends PluginSettingTab {
 	plugin: GranolaSyncPlugin;
+	private unbindProgress: (() => void) | null = null;
 
 	constructor(app: App, plugin: GranolaSyncPlugin) {
 		super(app, plugin);
 		this.plugin = plugin;
+	}
+
+	override hide(): void {
+		super.hide();
+		if (this.unbindProgress) {
+			this.unbindProgress();
+			this.unbindProgress = null;
+		}
 	}
 
 	override getSettingDefinitions(): SettingDefinitionItem<SettingKey>[] {
@@ -167,16 +183,75 @@ export class GranolaSyncSettingTab extends PluginSettingTab {
 				{
 					name: "Sync now",
 					desc: "Manually sync meetings from Granola",
-					// A button rather than an `action` row: nothing marks a row as
-					// clickable, and `action`'s row-index argument shows it is meant
-					// for list entries, not a standalone command.
 					render: (setting) => {
-						setting.addButton((button) =>
-							button
-								.setButtonText("Sync now")
-								.setCta()
-								.onClick(() => void this.plugin.syncMeetings(true))
-						);
+						const progressContainer = setting.controlEl.createDiv({
+							cls: "granola-sync-progress-container",
+						});
+
+						const buttonRow = progressContainer.createDiv();
+						const statusRow = progressContainer.createDiv({
+							cls: "granola-sync-status-text",
+						});
+						statusRow.hide();
+
+						const progressBar = progressContainer.createEl("progress", {
+							cls: "granola-sync-progress-bar",
+						});
+						progressBar.hide();
+
+						let actionButton: ButtonComponent | null = null;
+
+						const updateUI = (state: SyncProgressState) => {
+							if (!actionButton) return;
+							const isSyncing = this.plugin.isSyncActive || state.phase !== "idle";
+
+							if (isSyncing) {
+								actionButton.setButtonText(state.phase === "stopping" ? "Stopping..." : "Stop sync");
+								actionButton.buttonEl.classList.remove("mod-cta");
+								actionButton.setDestructive();
+								actionButton.setDisabled(state.phase === "stopping");
+
+								statusRow.setText(formatProgressMessage(state));
+								statusRow.show();
+
+								if (state.total > 0 && (state.phase === "meetings" || state.phase === "transcripts")) {
+									progressBar.max = state.total;
+									progressBar.value = state.current;
+									progressBar.show();
+								} else {
+									progressBar.hide();
+								}
+							} else {
+								actionButton.setButtonText("Sync now");
+								actionButton.buttonEl.classList.remove("mod-warning", "mod-destructive");
+								actionButton.setCta();
+								actionButton.setDisabled(false);
+
+								statusRow.setText("");
+								statusRow.hide();
+								progressBar.hide();
+							}
+						};
+
+						setting.addButton((button) => {
+							actionButton = button;
+							buttonRow.appendChild(button.buttonEl);
+							button.onClick(() => {
+								if (this.plugin.isSyncActive) {
+									this.plugin.cancelSync();
+								} else {
+									void this.plugin.syncMeetings(true);
+								}
+							});
+							updateUI(this.plugin.currentSyncProgress);
+						});
+
+						if (this.unbindProgress) {
+							this.unbindProgress();
+						}
+						this.unbindProgress = this.plugin.onProgress((state) => {
+							updateUI(state);
+						});
 					},
 				},
 				{
@@ -210,11 +285,44 @@ export class GranolaSyncSettingTab extends PluginSettingTab {
 				},
 				{
 					name: "Sync transcripts",
-					desc: "Include full meeting transcripts. Each meeting requires an extra API call.",
+					desc: "Include full meeting transcripts saved as separate linked documents. Each transcript requires a paced API call (~65s spacing).",
 					control: {
 						type: "toggle",
 						key: "syncTranscripts",
 						defaultValue: DEFAULT_SETTINGS.syncTranscripts,
+					},
+				},
+				{
+					name: "Transcript folder",
+					desc: "Where to save transcript notes. Supports {meeting_folder}, {date}, {granolaFolder}. Default saves in a Transcripts/ subfolder alongside the meeting note.",
+					control: {
+						type: "text",
+						key: "transcriptFolder",
+						placeholder: DEFAULT_SETTINGS.transcriptFolder,
+						defaultValue: DEFAULT_SETTINGS.transcriptFolder,
+					},
+				},
+				{
+					name: "Transcript filename pattern",
+					desc: "Pattern for transcript note filenames. Supports {filename}, {meeting_filename}, {title}, {date}, {id}.",
+					control: {
+						type: "text",
+						key: "transcriptFilenamePattern",
+						placeholder: DEFAULT_SETTINGS.transcriptFilenamePattern,
+						defaultValue: DEFAULT_SETTINGS.transcriptFilenamePattern,
+						validate: (value) =>
+							value.trim() ? undefined : "Enter a pattern — transcripts need a filename.",
+					},
+				},
+				{
+					name: "Transcript template path",
+					desc: "Path to transcript template file in your vault.",
+					control: {
+						type: "file",
+						key: "transcriptTemplatePath",
+						placeholder: DEFAULT_SETTINGS.transcriptTemplatePath,
+						defaultValue: DEFAULT_SETTINGS.transcriptTemplatePath,
+						filter: (file) => file.extension === "md",
 					},
 				},
 			],
@@ -228,7 +336,7 @@ export class GranolaSyncSettingTab extends PluginSettingTab {
 			items: [
 				{
 					name: "Folder path",
-					desc: "Where to save meeting notes. Takes date tokens, so Meetings/{date:YYYY/MM} files each meeting into a subfolder for its month.",
+					desc: "Where to save meeting notes. Supports {granolaFolder}, {date}, {date:YYYY/MM}, {title}, {id}.",
 					// Plain text rather than a folder suggester: the value is a pattern,
 					// and date tokens name folders that don't exist yet.
 					control: {
@@ -240,7 +348,7 @@ export class GranolaSyncSettingTab extends PluginSettingTab {
 				},
 				{
 					name: "Filename pattern",
-					desc: "Pattern for note filenames. Available: {date}, {date:YYYY-MM-DD}, {title}, {id}",
+					desc: "Pattern for note filenames. Available: {date}, {meeting_date}, {date:YYYY-MM-DD}, {title}, {meeting_name}, {id}, {granolaFolder}",
 					control: {
 						type: "text",
 						key: "filenamePattern",
