@@ -56,7 +56,7 @@ describe("RateLimiter", () => {
 		expect(timestamps.length).toBe(1);
 
 		// Trigger backoff of 500ms
-		void limiter.backoff(500);
+		limiter.backoff(500);
 
 		const nextPromise = limiter.execute(async () => {
 			timestamps.push(Date.now());
@@ -70,6 +70,21 @@ describe("RateLimiter", () => {
 		await vi.advanceTimersByTimeAsync(300);
 		await nextPromise;
 		expect(timestamps.length).toBe(2);
+	});
+
+	it("does not deadlock if backoff is called inside an execute task", async () => {
+		const limiter = new RateLimiter(50);
+		let completed = false;
+
+		const p = limiter.execute(async () => {
+			limiter.backoff(100);
+			completed = true;
+			return "ok";
+		});
+
+		await vi.advanceTimersByTimeAsync(0);
+		expect(completed).toBe(true);
+		expect(await p).toBe("ok");
 	});
 
 	it("continues processing subsequent tasks even if one throws", async () => {

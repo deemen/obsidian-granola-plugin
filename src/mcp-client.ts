@@ -164,7 +164,8 @@ export class GranolaMcpClient {
 				if (isTranscriptErrorResponse(text)) {
 					if (attempt < retries) {
 						const delay = 2000 * Math.pow(2, attempt);
-						await this.rateLimiter.backoff(delay);
+						this.rateLimiter.backoff(delay);
+						await new Promise((resolve) => window.setTimeout(resolve, delay));
 						continue;
 					}
 					throw new Error(`Granola rate limit: ${text.trim()}`);

@@ -178,6 +178,10 @@ function doFetch(input: string | URL, init: RequestInit | undefined, redirectCou
 
 		req.on("error", reject);
 
+		req.setTimeout(60000, () => {
+			req.destroy(new Error("Request timed out after 60 seconds"));
+		});
+
 		if (init?.signal) {
 			if (init.signal.aborted) {
 				req.destroy();

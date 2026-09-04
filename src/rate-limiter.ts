@@ -15,7 +15,7 @@ function sleep(ms: number): Promise<void> {
 
 export class RateLimiter {
 	private readonly minIntervalMs: number;
-	private lastExecutionTime = 0;
+	private nextAllowedTime = 0;
 	private queue: Promise<void> = Promise.resolve();
 
 	/**
@@ -33,9 +33,8 @@ export class RateLimiter {
 		return new Promise<T>((resolve, reject) => {
 			this.queue = this.queue.then(async () => {
 				const now = Date.now();
-				const timeSinceLast = now - this.lastExecutionTime;
-				if (this.lastExecutionTime > 0 && timeSinceLast < this.minIntervalMs) {
-					const delay = this.minIntervalMs - timeSinceLast;
+				if (now < this.nextAllowedTime) {
+					const delay = this.nextAllowedTime - now;
 					await sleep(delay);
 				}
 				try {
@@ -44,7 +43,7 @@ export class RateLimiter {
 				} catch (err) {
 					reject(err instanceof Error ? err : new Error(String(err)));
 				} finally {
-					this.lastExecutionTime = Date.now();
+					this.nextAllowedTime = Date.now() + this.minIntervalMs;
 				}
 			}).catch(() => {
 				// Ensure queue chain continues even on error
@@ -54,20 +53,21 @@ export class RateLimiter {
 
 	/**
 	 * Temporarily pause the queue for a backoff duration (e.g. when 429 is encountered).
+	 * Non-blocking and synchronous to prevent cyclic promise deadlocks if called from
+	 * inside an execute task.
 	 */
-	backoff(durationMs: number): Promise<void> {
-		this.queue = this.queue.then(async () => {
-			await sleep(durationMs);
-			this.lastExecutionTime = Date.now();
-		});
-		return this.queue;
+	backoff(durationMs: number): void {
+		const target = Date.now() + durationMs;
+		if (target > this.nextAllowedTime) {
+			this.nextAllowedTime = target;
+		}
 	}
 
 	/**
 	 * Reset the scheduler state.
 	 */
 	reset(): void {
-		this.lastExecutionTime = 0;
+		this.nextAllowedTime = 0;
 		this.queue = Promise.resolve();
 	}
 }
