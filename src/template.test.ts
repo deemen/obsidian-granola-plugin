@@ -8,6 +8,8 @@ import {
 	resolveNotePath,
 	resolveTranscriptPath,
 } from "./template";
+import DEFAULT_TEMPLATE from "./default-template.md";
+import DEFAULT_TRANSCRIPT_TEMPLATE from "./default-transcript-template.md";
 import type { MeetingData } from "./response-parser";
 
 function meeting(overrides: Partial<MeetingData> = {}): MeetingData {
@@ -69,6 +71,33 @@ describe("applyTemplate", () => {
 		expect(applyTemplate("{{granola_attendees}}", m)).toBe("Alice, Bob");
 		expect(applyTemplate("{{granola_attendees_list}}", m)).toBe("  - Alice\n  - Bob");
 		expect(applyTemplate("{{granola_attendees_linked_list}}", m)).toBe('  - "[[Alice]]"\n  - "[[Bob]]"');
+	});
+
+	it("formats folder and multi-folder variables", () => {
+		const m = meeting({
+			folder: "Client Acme",
+			folders: ["Client Acme", "Q3 Launch"],
+		});
+		expect(applyTemplate("{{granola_folder}}", m)).toBe("Client Acme");
+		expect(applyTemplate("{{granolaFolder}}", m)).toBe("Client Acme");
+		expect(applyTemplate("{{folder}}", m)).toBe("Client Acme");
+		expect(applyTemplate("{{granola_folders}}", m)).toBe("Client Acme, Q3 Launch");
+		expect(applyTemplate("{{granola_folders_linked}}", m)).toBe("[[Client Acme]], [[Q3 Launch]]");
+		expect(applyTemplate("{{granola_folders_list}}", m)).toBe("  - Client Acme\n  - Q3 Launch");
+		expect(applyTemplate("{{granola_folders_linked_list}}", m)).toBe('  - "[[Client Acme]]"\n  - "[[Q3 Launch]]"');
+	});
+
+	it("supports conditional blocks on folder variables", () => {
+		const withFolders = meeting({ folders: ["Acme"] });
+		const withoutFolders = meeting({ folders: [] });
+
+		const tpl = "{{#granola_folder}}Folder: {{granola_folder}}{{/granola_folder}}";
+		expect(applyTemplate(tpl, withFolders)).toBe("Folder: Acme");
+		expect(applyTemplate(tpl, withoutFolders)).toBe("");
+
+		const tplMulti = "{{#granola_folders}}Folders: {{granola_folders}}{{/granola_folders}}";
+		expect(applyTemplate(tplMulti, withFolders)).toBe("Folders: Acme");
+		expect(applyTemplate(tplMulti, withoutFolders)).toBe("");
 	});
 });
 
@@ -281,6 +310,20 @@ describe("resolveNotePath", () => {
 		});
 	});
 
+	it("expands granola_folder and folder tokens identically to granolaFolder", () => {
+		const m = meeting({ folder: "Clients/Acme Corp" });
+		expect(resolveNotePath("Meetings/{granola_folder}", "{granola_folder} - {title}", m)).toEqual({
+			folder: "Meetings/Clients/Acme Corp",
+			filename: "Clients-Acme Corp - Weekly Sync",
+			path: "Meetings/Clients/Acme Corp/Clients-Acme Corp - Weekly Sync.md",
+		});
+		expect(resolveNotePath("Meetings/{folder}", "{folder} - {title}", m)).toEqual({
+			folder: "Meetings/Clients/Acme Corp",
+			filename: "Clients-Acme Corp - Weekly Sync",
+			path: "Meetings/Clients/Acme Corp/Clients-Acme Corp - Weekly Sync.md",
+		});
+	});
+
 	it("collapses slashes cleanly when granolaFolder is missing", () => {
 		const m = meeting({ folder: undefined });
 		expect(resolveNotePath("Meetings/{granolaFolder}/{date}", "{title}", m)).toEqual({
@@ -408,5 +451,53 @@ describe("applyTemplate with extraVariables and bidirectional links", () => {
 		expect(rendered).toContain("date: 2026-09-06");
 		expect(rendered).toContain("start_time: 11:16 AM");
 		expect(rendered).toContain('transcript: "[[2026-09-06 Family Meeting (Transcript)]]"');
+	});
+});
+
+describe("default templates rendering with folders", () => {
+	it("renders folders property in DEFAULT_TEMPLATE when folders are present", () => {
+		const m = meeting({
+			folders: ["Client Acme", "Q3 Launch"],
+			participants: [{ name: "Alice", email: "a@example.com", organization: "", isCreator: false }],
+		});
+
+		const rendered = applyTemplate(DEFAULT_TEMPLATE, m).replace(/\r\n/g, "\n");
+		expect(rendered).toContain('folders:\n  - "[[Client Acme]]"\n  - "[[Q3 Launch]]"');
+		expect(rendered).toContain('attendees:\n  - "[[Alice]]"');
+		expect(rendered).toContain("type: meeting");
+	});
+
+	it("omits folders property completely in DEFAULT_TEMPLATE when no folders exist", () => {
+		const m = meeting({
+			folders: [],
+			folder: undefined,
+			participants: [{ name: "Alice", email: "a@example.com", organization: "", isCreator: false }],
+		});
+
+		const rendered = applyTemplate(DEFAULT_TEMPLATE, m).replace(/\r\n/g, "\n");
+		expect(rendered).not.toContain("folders:");
+		expect(rendered).toContain('attendees:\n  - "[[Alice]]"');
+	});
+
+	it("renders folders property in DEFAULT_TRANSCRIPT_TEMPLATE when folders are present", () => {
+		const m = meeting({
+			folders: ["Client Acme"],
+			transcript: "hello",
+		});
+
+		const rendered = applyTemplate(DEFAULT_TRANSCRIPT_TEMPLATE, m).replace(/\r\n/g, "\n");
+		expect(rendered).toContain('folders:\n  - "[[Client Acme]]"');
+		expect(rendered).toContain("type: transcript");
+	});
+
+	it("omits folders property in DEFAULT_TRANSCRIPT_TEMPLATE when no folders exist", () => {
+		const m = meeting({
+			folders: [],
+			folder: undefined,
+			transcript: "hello",
+		});
+
+		const rendered = applyTemplate(DEFAULT_TRANSCRIPT_TEMPLATE, m).replace(/\r\n/g, "\n");
+		expect(rendered).not.toContain("folders:");
 	});
 });

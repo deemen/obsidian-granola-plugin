@@ -31,7 +31,9 @@ import {
 	getFolderBasePath,
 	resolveNotePath,
 	resolveTranscriptPath,
+	sanitizeFilename,
 } from "./template";
+import { formatFolderIndexContent } from "./folder-index";
 import {
 	createInitialSyncProgress,
 	formatStatusBarText,
@@ -191,6 +193,12 @@ export default class GranolaSyncPlugin extends Plugin {
 			id: "reroute-transcripts",
 			name: "Re-route transcripts to match folder pattern",
 			callback: () => void this.reRouteAllTranscripts(),
+		});
+
+		this.addCommand({
+			id: "update-folder-indices",
+			name: "Update folder index notes",
+			callback: () => void this.updateFolderIndexNotes(true),
 		});
 
 		this.addCommand({
@@ -638,6 +646,14 @@ export default class GranolaSyncPlugin extends Plugin {
 			}
 		}
 
+		if (this.settings.generateFolderIndexNotes) {
+			try {
+				await this.updateFolderIndexNotes(false, ctx.existingDocs);
+			} catch (error) {
+				console.error("Granola: failed to update folder index notes", error);
+			}
+		}
+
 		if (manual) {
 			const accountSuffix =
 				connectedAccounts.length > 1 ? ` across ${connectedAccounts.length} accounts` : "";
@@ -714,6 +730,11 @@ export default class GranolaSyncPlugin extends Plugin {
 				);
 			}
 
+			const folders = cached.folders && cached.folders.length > 0
+				? cached.folders
+				: (cached.folder ? [cached.folder] : []);
+			const primaryFolder = folders[0] ?? cached.folder;
+
 			const meetingData: MeetingData = {
 				id: cached.id,
 				title: cached.title,
@@ -721,7 +742,8 @@ export default class GranolaSyncPlugin extends Plugin {
 				startTime: cached.startTime,
 				created: cached.created,
 				url: cached.url,
-				folder: cached.folder,
+				folder: primaryFolder,
+				folders,
 				participants,
 				privateNotes: cached.privateNotes,
 				enhancedNotes: cached.enhancedNotes,
@@ -791,6 +813,11 @@ export default class GranolaSyncPlugin extends Plugin {
 			const existingFile = existingDocs.get(cached.id);
 			if (!existingFile) continue;
 
+			const folders = cached.folders && cached.folders.length > 0
+				? cached.folders
+				: (cached.folder ? [cached.folder] : []);
+			const primaryFolder = folders[0] ?? cached.folder;
+
 			const meetingData: MeetingData = {
 				id: cached.id,
 				title: cached.title,
@@ -798,7 +825,8 @@ export default class GranolaSyncPlugin extends Plugin {
 				startTime: cached.startTime,
 				created: cached.created,
 				url: cached.url,
-				folder: cached.folder,
+				folder: primaryFolder,
+				folders,
 				participants: cached.participants,
 				privateNotes: cached.privateNotes,
 				enhancedNotes: cached.enhancedNotes,
@@ -891,6 +919,11 @@ export default class GranolaSyncPlugin extends Plugin {
 				);
 			}
 
+			const folders = cached.folders && cached.folders.length > 0
+				? cached.folders
+				: (cached.folder ? [cached.folder] : []);
+			const primaryFolder = folders[0] ?? cached.folder;
+
 			const meetingData: MeetingData = {
 				id: cached.id,
 				title: cached.title,
@@ -898,7 +931,8 @@ export default class GranolaSyncPlugin extends Plugin {
 				startTime: cached.startTime,
 				created: cached.created,
 				url: cached.url,
-				folder: cached.folder,
+				folder: primaryFolder,
+				folders,
 				participants,
 				privateNotes: cached.privateNotes,
 				enhancedNotes: cached.enhancedNotes,
@@ -981,6 +1015,11 @@ export default class GranolaSyncPlugin extends Plugin {
 			const existingFile = existingTranscripts.get(cached.id);
 			if (!existingFile) continue;
 
+			const folders = cached.folders && cached.folders.length > 0
+				? cached.folders
+				: (cached.folder ? [cached.folder] : []);
+			const primaryFolder = folders[0] ?? cached.folder;
+
 			const meetingData: MeetingData = {
 				id: cached.id,
 				title: cached.title,
@@ -988,7 +1027,8 @@ export default class GranolaSyncPlugin extends Plugin {
 				startTime: cached.startTime,
 				created: cached.created,
 				url: cached.url,
-				folder: cached.folder,
+				folder: primaryFolder,
+				folders,
 				participants: cached.participants,
 				privateNotes: cached.privateNotes,
 				enhancedNotes: cached.enhancedNotes,
@@ -1184,6 +1224,47 @@ export default class GranolaSyncPlugin extends Plugin {
 			return { created: 0, updated: 0, skipped: 0, transcriptsCreated: 0 };
 		}
 
+		// Query Granola folders and map meetings to folder names
+		const meetingFoldersMap = new Map<string, string[]>();
+		try {
+			const folders = await mcp.listMeetingFolders(ctx.signal);
+			for (const f of folders) {
+				if (!f.id) continue;
+				if (ctx.signal.aborted) throw new DOMException("The operation was aborted", "AbortError");
+				try {
+					const folderMeetingsXml = await mcp.listMeetings(
+						this.settings.syncTimeRange,
+						this.settings.onlyMyMeetings,
+						ctx.signal,
+						f.id,
+					);
+					const folderMeetings = parseMeetingsResponse(folderMeetingsXml);
+					for (const fm of folderMeetings) {
+						const list = meetingFoldersMap.get(fm.id) ?? [];
+						if (f.title && !list.includes(f.title)) {
+							list.push(f.title);
+						}
+						meetingFoldersMap.set(fm.id, list);
+					}
+				} catch (err) {
+					if (this.isAbortError(err)) throw err;
+					console.warn(`Granola: failed to list meetings for folder ${f.title} (${f.id})`, err);
+				}
+			}
+		} catch (error) {
+			if (this.isAbortError(error)) throw error;
+			console.warn("Granola: listMeetingFolders unavailable or failed", error);
+		}
+
+		// Attach discovered folders to listedMeetings
+		for (const m of listedMeetings) {
+			const folders = meetingFoldersMap.get(m.id);
+			if (folders && folders.length > 0) {
+				m.folders = folders;
+				m.folder = folders[0];
+			}
+		}
+
 		// Determine which meetings need note creation/update
 		const meetingsToSyncNotes = listedMeetings.filter((m) => {
 			const hasInVault = ctx.existingDocs.has(m.id);
@@ -1223,6 +1304,16 @@ export default class GranolaSyncPlugin extends Plugin {
 		for (const id of neededIdsSet) {
 			const cached = await this.cacheStore.getMeeting(id);
 			if (cached) {
+				const folders = meetingFoldersMap.get(id) ?? cached.folders ?? (cached.folder ? [cached.folder] : []);
+				const primaryFolder = folders[0] ?? cached.folder;
+
+				// Backfill folders in cache if newly discovered
+				if (folders.length > 0 && (!cached.folders || cached.folders.length === 0)) {
+					cached.folders = folders;
+					cached.folder = primaryFolder;
+					await this.cacheStore.saveMeeting(cached);
+				}
+
 				const parsed: ParsedMeetingDetails = {
 					id: cached.id,
 					title: cached.title,
@@ -1230,7 +1321,8 @@ export default class GranolaSyncPlugin extends Plugin {
 					startTime: cached.startTime,
 					created: cached.created,
 					participants: cached.participants,
-					folder: cached.folder,
+					folder: primaryFolder,
+					folders,
 					privateNotes: cached.privateNotes,
 					summary: cached.enhancedNotes,
 				};
@@ -1249,6 +1341,10 @@ export default class GranolaSyncPlugin extends Plugin {
 				const parsed = parseMeetingsResponse(detailsResponse);
 				allDetails.push(...parsed);
 				for (const item of parsed) {
+					const folders = meetingFoldersMap.get(item.id) ?? item.folders ?? (item.folder ? [item.folder] : []);
+					const primaryFolder = folders[0] ?? item.folder;
+					item.folders = folders;
+					item.folder = primaryFolder;
 					detailsMap.set(item.id, item);
 					const meetingData = buildMeetingData(item, "");
 					const record: CachedMeetingRecord = {
@@ -1258,7 +1354,8 @@ export default class GranolaSyncPlugin extends Plugin {
 						startTime: meetingData.startTime,
 						created: meetingData.created,
 						url: meetingData.url,
-						folder: item.folder,
+						folder: primaryFolder,
+						folders,
 						participants: item.participants,
 						privateNotes: item.privateNotes,
 						enhancedNotes: item.summary,
@@ -1482,6 +1579,92 @@ export default class GranolaSyncPlugin extends Plugin {
 		}
 
 		return { created, updated, skipped, transcriptsCreated };
+	}
+
+	async updateFolderIndexNotes(
+		manual = false,
+		existingDocsMap?: Map<string, TFile>,
+	): Promise<void> {
+		const cachedMeetings = await this.cacheStore.listMeetings();
+		if (cachedMeetings.length === 0) {
+			if (manual) new Notice("Granola: No cached meetings found to index.");
+			return;
+		}
+
+		if (!existingDocsMap) {
+			const folderBasePath = getFolderBasePath(
+				normalizePath(this.settings.folderPath || DEFAULT_SETTINGS.folderPath),
+			);
+			const { existingDocs } = this.indexVaultFiles(folderBasePath);
+			existingDocsMap = existingDocs;
+		}
+
+		// Group meetings by folder title
+		const folderMap = new Map<string, CachedMeetingRecord[]>();
+		for (const meeting of cachedMeetings) {
+			const folders = meeting.folders && meeting.folders.length > 0
+				? meeting.folders
+				: (meeting.folder ? [meeting.folder] : []);
+			for (const f of folders) {
+				const trimmed = f.trim();
+				if (!trimmed) continue;
+				const list = folderMap.get(trimmed) ?? [];
+				list.push(meeting);
+				folderMap.set(trimmed, list);
+			}
+		}
+
+		if (folderMap.size === 0) {
+			if (manual) new Notice("Granola: No folders found in cached meetings.");
+			return;
+		}
+
+		const indexFolder = normalizePath(
+			this.settings.folderIndexFolder || DEFAULT_SETTINGS.folderIndexFolder,
+		);
+		await this.ensureFolderExists(indexFolder);
+
+		let updatedCount = 0;
+		for (const [folderTitle, meetings] of folderMap.entries()) {
+			// Sort newest first
+			meetings.sort((a, b) => b.date.localeCompare(a.date));
+
+			const meetingLinks = meetings.map((m) => {
+				const file = existingDocsMap?.get(m.id);
+				const basename = file ? file.basename : `${m.date} ${m.title}`;
+				if (m.date && !basename.includes(m.date)) {
+					return `- ${m.date} — [[${basename}]]`;
+				}
+				return `- [[${basename}]]`;
+			});
+
+			const sanitizedTitle = sanitizeFilename(folderTitle);
+			const targetPath = normalizePath(`${indexFolder}/${sanitizedTitle}.md`);
+			const existingAbstract = this.app.vault.getAbstractFileByPath(targetPath);
+
+			let existingContent: string | undefined;
+			if (existingAbstract instanceof TFile) {
+				existingContent = await this.app.vault.read(existingAbstract);
+			}
+
+			const newContent = formatFolderIndexContent(folderTitle, meetingLinks, existingContent);
+
+			if (existingAbstract instanceof TFile) {
+				if (existingContent !== newContent) {
+					await this.app.vault.modify(existingAbstract, newContent);
+					updatedCount++;
+				}
+			} else {
+				await this.app.vault.create(targetPath, newContent);
+				updatedCount++;
+			}
+		}
+
+		if (manual) {
+			new Notice(
+				`Granola: Checked ${folderMap.size} folder index note${folderMap.size !== 1 ? "s" : ""} (${updatedCount} modified)`,
+			);
+		}
 	}
 }
 

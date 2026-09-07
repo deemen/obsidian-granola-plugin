@@ -3,7 +3,11 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import type { GranolaAuthProvider } from "./auth";
 import { nodeFetch } from "./fetch";
 import { RateLimiter } from "./rate-limiter";
-import { isTranscriptErrorResponse } from "./response-parser";
+import {
+	isTranscriptErrorResponse,
+	parseMeetingFoldersResponse,
+	type ParsedFolder,
+} from "./response-parser";
 import { sleep } from "./sync-progress";
 
 const MCP_SERVER_URL = "https://mcp.granola.ai/mcp";
@@ -44,6 +48,7 @@ export function buildListMeetingsArgs(
 	timeRange: SyncTimeRange,
 	onlyMyMeetings: boolean,
 	now: Date = new Date(),
+	folderId?: string,
 ): Record<string, unknown> {
 	const args: Record<string, unknown> = {};
 
@@ -77,6 +82,9 @@ export function buildListMeetingsArgs(
 
 	if (onlyMyMeetings) {
 		args.involvement = { captured_by_me: true, listed_as_participant: true };
+	}
+	if (folderId) {
+		args.folder_id = folderId;
 	}
 	return args;
 }
@@ -145,14 +153,32 @@ export class GranolaMcpClient {
 		timeRange: SyncTimeRange,
 		onlyMyMeetings: boolean,
 		signal?: AbortSignal,
+		folderId?: string,
 	): Promise<string> {
 		return this.callToolText(
 			this.rateLimiter,
 			"list_meetings",
-			buildListMeetingsArgs(timeRange, onlyMyMeetings),
+			buildListMeetingsArgs(timeRange, onlyMyMeetings, undefined, folderId),
 			2,
 			signal,
 		);
+	}
+
+	async listMeetingFolders(signal?: AbortSignal): Promise<ParsedFolder[]> {
+		try {
+			const text = await this.callToolText(
+				this.rateLimiter,
+				"list_meeting_folders",
+				{},
+				2,
+				signal,
+			);
+			return parseMeetingFoldersResponse(text);
+		} catch (error) {
+			if (signal?.aborted) throw error;
+			console.warn("Granola: list_meeting_folders unavailable or failed", error);
+			return [];
+		}
 	}
 
 	async getMeetings(meetingIds: string[], signal?: AbortSignal): Promise<string> {

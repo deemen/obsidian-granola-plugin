@@ -10,6 +10,8 @@ describe("DEFAULT_SETTINGS", () => {
 		expect(DEFAULT_SETTINGS.rerouteExistingNotes).toBe(false);
 		expect(DEFAULT_SETTINGS.updateTranscriptContent).toBe(true);
 		expect(DEFAULT_SETTINGS.rerouteExistingTranscripts).toBe(false);
+		expect(DEFAULT_SETTINGS.generateFolderIndexNotes).toBe(false);
+		expect(DEFAULT_SETTINGS.folderIndexFolder).toBe("Meetings/Folders");
 	});
 });
 
@@ -73,13 +75,14 @@ describe("GranolaSyncSettingTab group structure", () => {
 		const tab = new GranolaSyncSettingTab(new App(), mockPlugin);
 		const defs = tab.getSettingDefinitions();
 
-		expect(defs.length).toBe(6);
+		expect(defs.length).toBe(7);
 		expect((defs[0] as { heading?: string }).heading).toBe("Granola accounts");
 		expect((defs[1] as { heading?: string }).heading).toBe("Sync");
 		expect((defs[2] as { heading?: string }).heading).toBe("Cache");
 		expect((defs[3] as { heading?: string }).heading).toBe("Attendees");
 		expect((defs[4] as { heading?: string }).heading).toBe("Notes");
 		expect((defs[5] as { heading?: string }).heading).toBe("Transcripts");
+		expect((defs[6] as { heading?: string }).heading).toBe("Folders & Indexing");
 
 		const notesGroup = defs[4] as { items: Array<{ control?: { key: string } }> };
 		const noteKeys = notesGroup.items.map((i) => i.control?.key).filter(Boolean);
@@ -97,6 +100,11 @@ describe("GranolaSyncSettingTab group structure", () => {
 		expect(transcriptKeys).toContain("transcriptTemplatePath");
 		expect(transcriptKeys).toContain("updateTranscriptContent");
 		expect(transcriptKeys).toContain("rerouteExistingTranscripts");
+
+		const foldersGroup = defs[6] as { items: Array<{ control?: { key: string } }> };
+		const folderKeys = foldersGroup.items.map((i) => i.control?.key).filter(Boolean);
+		expect(folderKeys).toContain("generateFolderIndexNotes");
+		expect(folderKeys).toContain("folderIndexFolder");
 	});
 });
 

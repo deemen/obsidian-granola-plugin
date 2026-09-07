@@ -7,6 +7,10 @@ type: meeting
 {{#granola_meeting_transcript}}
 meeting_transcript: "[[{{granola_meeting_transcript}}]]"
 {{/granola_meeting_transcript}}
+{{#granola_folders}}
+folders:
+{{granola_folders_linked_list}}
+{{/granola_folders}}
 attendees:
 {{granola_attendees_linked_list}}
 tags:

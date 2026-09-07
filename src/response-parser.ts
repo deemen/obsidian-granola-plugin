@@ -11,6 +11,7 @@ export interface ParsedMeeting {
 	date: string; // raw from API, e.g. "Mar 3, 2026 3:00 PM"
 	participants: ParsedParticipant[];
 	folder?: string;
+	folders?: string[];
 	startTime?: string;
 	created?: string;
 }
@@ -32,6 +33,12 @@ export interface MeetingData {
 	transcript: string;
 	participants: ParsedParticipant[];
 	folder?: string;
+	folders?: string[];
+}
+
+export interface ParsedFolder {
+	id: string;
+	title: string;
 }
 
 /**
@@ -379,6 +386,95 @@ export function parseGranolaDate(dateStr: string): { isoDate: string; time: stri
 }
 
 /**
+ * Parse the list_meeting_folders response from Granola's MCP server.
+ * Supports JSON arrays ([{ folder_id, title }]), JSON objects with folders array ({ folders: [...] }),
+ * and XML formats (<folder id="..." title="..." />).
+ */
+export function parseMeetingFoldersResponse(text: string): ParsedFolder[] {
+	if (!text?.trim()) return [];
+
+	const trimmed = text.trim();
+	let jsonCandidate: unknown = null;
+	try {
+		jsonCandidate = JSON.parse(trimmed);
+	} catch {
+		const firstBracket = trimmed.indexOf("[");
+		const lastBracket = trimmed.lastIndexOf("]");
+		if (firstBracket !== -1 && lastBracket > firstBracket) {
+			try {
+				jsonCandidate = JSON.parse(trimmed.slice(firstBracket, lastBracket + 1));
+			} catch {
+				// fall through
+			}
+		}
+		if (!jsonCandidate) {
+			const firstBrace = trimmed.indexOf("{");
+			const lastBrace = trimmed.lastIndexOf("}");
+			if (firstBrace !== -1 && lastBrace > firstBrace) {
+				try {
+					jsonCandidate = JSON.parse(trimmed.slice(firstBrace, lastBrace + 1));
+				} catch {
+					// fall through
+				}
+			}
+		}
+	}
+
+	if (jsonCandidate) {
+		let rawList: unknown[] = [];
+		if (Array.isArray(jsonCandidate)) {
+			rawList = jsonCandidate;
+		} else if (
+			typeof jsonCandidate === "object" &&
+			jsonCandidate !== null &&
+			"folders" in jsonCandidate &&
+			Array.isArray(jsonCandidate.folders)
+		) {
+			rawList = jsonCandidate.folders;
+		}
+
+		const results: ParsedFolder[] = [];
+		for (const item of rawList) {
+			if (typeof item === "object" && item !== null) {
+				const record = item as Record<string, unknown>;
+				const rawId = record.folder_id ?? record.id;
+				const rawTitle = record.title ?? record.name;
+				const id = typeof rawId === "string" || typeof rawId === "number" ? String(rawId).trim() : "";
+				const title = typeof rawTitle === "string" || typeof rawTitle === "number" ? String(rawTitle).trim() : "";
+				if (id || title) {
+					results.push({ id, title: title || id });
+				}
+			}
+		}
+		if (results.length > 0) return results;
+	}
+
+	// Fall back to XML parsing: <folder ...>
+	const results: ParsedFolder[] = [];
+	const folderRegex = /<folder\s+((?:"[^"]*"|[^>"])*?)(?:\/?>|>([\s\S]*?)<\/folder>)/gi;
+	let match;
+	while ((match = folderRegex.exec(trimmed)) !== null) {
+		const openTag = match[1];
+		const body = match[2] || "";
+		const id = attr(openTag, "id") || attr(openTag, "folder_id") || "";
+		let title = attr(openTag, "title") || attr(openTag, "name") || "";
+		if (!title && body) {
+			const titleMatch =
+				body.match(/<title>\s*([\s\S]*?)\s*<\/title>/i) ||
+				body.match(/<name>\s*([\s\S]*?)\s*<\/name>/i);
+			if (titleMatch) {
+				title = decodeXmlEntities(titleMatch[1].trim());
+			}
+		}
+		if (id || title) {
+			results.push({ id, title: title || id });
+		}
+	}
+
+	return results;
+}
+
+/**
  * Build a MeetingData object from parsed API responses.
  */
 export function buildMeetingData(
@@ -386,6 +482,8 @@ export function buildMeetingData(
 	transcript: string,
 ): MeetingData {
 	const { isoDate, time, isoDateTime } = parseGranolaDate(details.date);
+	const folders = details.folders ?? (details.folder ? [details.folder] : []);
+	const folder = folders[0] ?? details.folder;
 
 	return {
 		id: details.id,
@@ -398,6 +496,7 @@ export function buildMeetingData(
 		enhancedNotes: details.summary,
 		transcript: formatTranscriptText(transcript),
 		participants: details.participants,
-		folder: details.folder,
+		folder,
+		folders,
 	};
 }

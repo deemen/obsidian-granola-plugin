@@ -7,6 +7,10 @@ type: transcript
 {{#granola_meeting_note}}
 meeting_note: "[[{{granola_meeting_note}}]]"
 {{/granola_meeting_note}}
+{{#granola_folders}}
+folders:
+{{granola_folders_linked_list}}
+{{/granola_folders}}
 tags:
   - transcript
   - granola

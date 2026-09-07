@@ -9,6 +9,7 @@ export interface CachedMeetingRecord {
 	created: string; // ISO datetime
 	url: string;
 	folder?: string;
+	folders?: string[];
 	participants: ParsedParticipant[];
 	privateNotes: string;
 	enhancedNotes: string;

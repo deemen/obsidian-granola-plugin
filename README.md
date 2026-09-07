@@ -110,13 +110,23 @@ The plugin operates on a robust two-stage pipeline:
 
 ### Available Variables
 
-#### Core & Folder Variables
+#### Core Variables
 - `{{granola_id}}` - Unique meeting ID
 - `{{granola_title}}` - Meeting title
 - `{{granola_date}}` - Date (YYYY-MM-DD)
-- `{{granola_folder}}` - Granola folder name
 - `{{granola_url}}` - Link to meeting on Granola web
 - `{{granola_start_time}}` - Start time (e.g., "3:00 PM")
+
+#### Folder & Collection Variables
+- `{{granola_folder}}` (aliases: `{{granolaFolder}}`, `{{folder}}`) - Primary folder name
+- `{{granola_folders}}` - Comma-separated list of all folders
+- `{{granola_folders_linked}}` - With Obsidian links: `[[Client Acme]], [[Q3 Launch]]`
+- `{{granola_folders_list}}` - YAML list format
+- `{{granola_folders_linked_list}}` - YAML list with links:
+  ```yaml
+  folders:
+  {{granola_folders_linked_list}}
+  ```
 
 #### Bidirectional Linking Variables
 - `{{granola_meeting_transcript}}` - The filename/title of the linked transcript document (for use in meeting note templates)
@@ -149,6 +159,10 @@ type: meeting
 {{#granola_meeting_transcript}}
 meeting_transcript: "[[{{granola_meeting_transcript}}]]"
 {{/granola_meeting_transcript}}
+{{#granola_folders}}
+folders:
+{{granola_folders_linked_list}}
+{{/granola_folders}}
 attendees:
 {{granola_attendees_linked_list}}
 tags:
@@ -177,6 +191,10 @@ type: transcript
 {{#granola_meeting_note}}
 meeting_note: "[[{{granola_meeting_note}}]]"
 {{/granola_meeting_note}}
+{{#granola_folders}}
+folders:
+{{granola_folders_linked_list}}
+{{/granola_folders}}
 tags:
   - transcript
   - granola

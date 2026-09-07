@@ -51,6 +51,12 @@ export function applyTemplate(
 		.map((p) => resolveParticipantName(p, emailToNoteTitle))
 		.filter((name): name is string => name !== null);
 
+	const folders = meeting.folders && meeting.folders.length > 0
+		? meeting.folders
+		: (meeting.folder ? [meeting.folder] : []);
+	const primaryFolder = meeting.folder ?? folders[0] ?? "";
+	const nl = template.includes("\r\n") ? "\r\n" : "\n";
+
 	const variables: Record<string, string> = {
 		granola_id: meeting.id,
 		granola_title: meeting.title,
@@ -58,15 +64,22 @@ export function applyTemplate(
 		granola_created: meeting.created,
 		granola_updated: "",
 		granola_private_notes: meeting.privateNotes,
+		enhancedNotes: meeting.enhancedNotes,
 		granola_enhanced_notes: meeting.enhancedNotes,
 		granola_transcript: meeting.transcript,
-		granola_folder: meeting.folder ?? "",
+		granola_folder: primaryFolder,
+		granolaFolder: primaryFolder,
+		folder: primaryFolder,
+		granola_folders: folders.join(", "),
+		granola_folders_linked: folders.map((f) => `[[${f}]]`).join(", "),
+		granola_folders_list: folders.map((f) => `  - ${f}`).join(nl),
+		granola_folders_linked_list: folders.map((f) => `  - "[[${f}]]"`).join(nl),
 		granola_attendees: attendeeNames.join(", "),
 		granola_attendees_linked: attendeeNames.map((name) => `[[${name}]]`).join(", "),
-		granola_attendees_list: attendeeNames.map((name) => `  - ${name}`).join("\n"),
+		granola_attendees_list: attendeeNames.map((name) => `  - ${name}`).join(nl),
 		granola_attendees_linked_list: attendeeNames
 			.map((name) => `  - "[[${name}]]"`)
-			.join("\n"),
+			.join(nl),
 		granola_url: meeting.url,
 		granola_duration: "",
 		granola_start_time: meeting.startTime,
@@ -253,6 +266,7 @@ export function generateFilename(
 		id: meeting.id.slice(0, 8),
 		folder: sanitizedFolder,
 		granolaFolder: sanitizedFolder,
+		granola_folder: sanitizedFolder,
 		...Object.fromEntries(
 			Object.entries(extraTokens).map(([k, v]) => [k, sanitizeFilename(v)]),
 		),
@@ -283,6 +297,7 @@ export function resolveFolderPath(
 		id: meeting.id.slice(0, 8),
 		folder: sanitizedFolder,
 		granolaFolder: sanitizedFolder,
+		granola_folder: sanitizedFolder,
 		meeting_folder: extraTokens.meeting_folder ? normalizePath(extraTokens.meeting_folder) : "",
 		...extraTokens,
 	};

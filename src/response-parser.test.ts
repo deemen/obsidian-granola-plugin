@@ -12,6 +12,7 @@ import {
 	normalizeTaskItems,
 	decodeXmlEntities,
 	excludeSelf,
+	parseMeetingFoldersResponse,
 } from "./response-parser";
 
 describe("decodeXmlEntities", () => {
@@ -472,5 +473,102 @@ describe("buildMeetingData", () => {
 			"",
 		);
 		expect(data.title).toBe("Untitled Meeting");
+	});
+
+	it("populates folders array and derives primary folder", () => {
+		const data = buildMeetingData(
+			{
+				id: "id-1",
+				title: "Sprint Planning",
+				date: "2026-09-06",
+				participants: [],
+				privateNotes: "",
+				summary: "recap",
+				folders: ["Client Acme", "Q3 Launch"],
+			},
+			"",
+		);
+		expect(data.folders).toEqual(["Client Acme", "Q3 Launch"]);
+		expect(data.folder).toBe("Client Acme");
+	});
+
+	it("falls back to details.folder if folders array is absent", () => {
+		const data = buildMeetingData(
+			{
+				id: "id-2",
+				title: "Sprint Planning",
+				date: "2026-09-06",
+				participants: [],
+				privateNotes: "",
+				summary: "recap",
+				folder: "Single Folder",
+			},
+			"",
+		);
+		expect(data.folders).toEqual(["Single Folder"]);
+		expect(data.folder).toBe("Single Folder");
+	});
+});
+
+describe("parseMeetingFoldersResponse", () => {
+	it("parses JSON array of folders with folder_id and title", () => {
+		const json = JSON.stringify([
+			{ folder_id: "f_1", title: "Acme Corp", description: "All client meetings", note_count: 5 },
+			{ folder_id: "f_2", title: "Product Strategy", description: "", note_count: 2 },
+		]);
+		const folders = parseMeetingFoldersResponse(json);
+		expect(folders).toEqual([
+			{ id: "f_1", title: "Acme Corp" },
+			{ id: "f_2", title: "Product Strategy" },
+		]);
+	});
+
+	it("parses JSON array with id and name aliases", () => {
+		const json = JSON.stringify([
+			{ id: "f_3", name: "Engineering" },
+		]);
+		const folders = parseMeetingFoldersResponse(json);
+		expect(folders).toEqual([
+			{ id: "f_3", title: "Engineering" },
+		]);
+	});
+
+	it("parses JSON wrapped in an object with a folders array", () => {
+		const json = JSON.stringify({
+			folders: [
+				{ folder_id: "f_4", title: "Sales" },
+			],
+		});
+		const folders = parseMeetingFoldersResponse(json);
+		expect(folders).toEqual([
+			{ id: "f_4", title: "Sales" },
+		]);
+	});
+
+	it("parses JSON embedded inside text preambles", () => {
+		const text = `Here are the folders available:\n[{"folder_id": "f_5", "title": "Operations"}]\nEnd of folders.`;
+		const folders = parseMeetingFoldersResponse(text);
+		expect(folders).toEqual([
+			{ id: "f_5", title: "Operations" },
+		]);
+	});
+
+	it("parses XML folder tags", () => {
+		const xml = `
+			<folders>
+				<folder id="f_6" title="Design &amp; UI" />
+				<folder folder_id="f_7" name="Marketing" />
+			</folders>
+		`;
+		const folders = parseMeetingFoldersResponse(xml);
+		expect(folders).toEqual([
+			{ id: "f_6", title: "Design & UI" },
+			{ id: "f_7", title: "Marketing" },
+		]);
+	});
+
+	it("returns empty array for empty or invalid input", () => {
+		expect(parseMeetingFoldersResponse("")).toEqual([]);
+		expect(parseMeetingFoldersResponse("No folders found.")).toEqual([]);
 	});
 });

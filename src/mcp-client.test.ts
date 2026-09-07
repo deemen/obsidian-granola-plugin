@@ -61,6 +61,15 @@ describe("buildListMeetingsArgs", () => {
 			involvement: { captured_by_me: true, listed_as_participant: true },
 		});
 	});
+
+	it("includes folder_id when passed", () => {
+		const args = buildListMeetingsArgs("last_30_days", true, undefined, "f_123");
+		expect(args).toEqual({
+			time_range: "last_30_days",
+			involvement: { captured_by_me: true, listed_as_participant: true },
+			folder_id: "f_123",
+		});
+	});
 });
 
 describe("GranolaMcpClient rate limiting", () => {
@@ -159,6 +168,53 @@ describe("GranolaMcpClient rate limiting", () => {
 
 		expect(res).toBe("Speaker: second attempt success");
 		expect(backoffSpy).toHaveBeenCalledWith(0);
+	});
+
+	it("calls list_meeting_folders and returns parsed folders", async () => {
+		const { GranolaMcpClient } = await import("./mcp-client");
+		const mockAuth = {
+			redirectUrl: "",
+			clientMetadata: {} as never,
+			state: async () => "",
+			tokens: async () => undefined,
+			saveTokens: async () => {},
+			clientInformation: async () => undefined,
+		};
+		const client = new GranolaMcpClient(mockAuth as unknown as GranolaAuthProvider);
+		const mockClient = {
+			callTool: async ({ name }: { name: string }) => {
+				if (name === "list_meeting_folders") {
+					return {
+						content: [{ type: "text", text: JSON.stringify([{ folder_id: "f_1", title: "Acme" }]) }],
+					};
+				}
+				return { content: [] };
+			},
+		};
+		(client as unknown as { client: typeof mockClient }).client = mockClient;
+		const folders = await client.listMeetingFolders();
+		expect(folders).toEqual([{ id: "f_1", title: "Acme" }]);
+	});
+
+	it("returns empty array if list_meeting_folders throws", async () => {
+		const { GranolaMcpClient } = await import("./mcp-client");
+		const mockAuth = {
+			redirectUrl: "",
+			clientMetadata: {} as never,
+			state: async () => "",
+			tokens: async () => undefined,
+			saveTokens: async () => {},
+			clientInformation: async () => undefined,
+		};
+		const client = new GranolaMcpClient(mockAuth as unknown as GranolaAuthProvider);
+		const mockClient = {
+			callTool: async () => {
+				throw new Error("Tool not found");
+			},
+		};
+		(client as unknown as { client: typeof mockClient }).client = mockClient;
+		const folders = await client.listMeetingFolders();
+		expect(folders).toEqual([]);
 	});
 });
 

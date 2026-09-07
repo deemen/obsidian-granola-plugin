@@ -63,6 +63,10 @@ export interface GranolaSyncSettings {
 	updateTranscriptContent: boolean;
 	rerouteExistingTranscripts: boolean;
 
+	// Folders & Indexing
+	generateFolderIndexNotes: boolean;
+	folderIndexFolder: string;
+
 	// Legacy backwards-compatibility
 	skipExistingNotes?: boolean;
 }
@@ -88,6 +92,9 @@ export const DEFAULT_SETTINGS: GranolaSyncSettings = {
 	transcriptTemplatePath: "Templates/Granola Transcript.md",
 	updateTranscriptContent: true,
 	rerouteExistingTranscripts: false,
+
+	generateFolderIndexNotes: false,
+	folderIndexFolder: "Meetings/Folders",
 };
 
 /**
@@ -140,6 +147,7 @@ export class GranolaSyncSettingTab extends PluginSettingTab {
 			this.attendeesGroup(),
 			this.notesGroup(),
 			this.transcriptsGroup(),
+			this.foldersGroup(),
 		];
 	}
 
@@ -644,6 +652,54 @@ export class GranolaSyncSettingTab extends PluginSettingTab {
 									} finally {
 										button.setDisabled(false);
 										button.setButtonText("Re-route transcripts");
+									}
+								}),
+						);
+					},
+				},
+			],
+		};
+	}
+
+	private foldersGroup(): SettingDefinitionItem<SettingKey> {
+		return {
+			type: "group",
+			heading: "Folders & Indexing",
+			items: [
+				{
+					name: "Generate folder index notes",
+					desc: "Create and update an index note (Map of Content) for each Granola folder. Manual user notes outside the generated list section are preserved.",
+					control: {
+						type: "toggle",
+						key: "generateFolderIndexNotes",
+						defaultValue: DEFAULT_SETTINGS.generateFolderIndexNotes,
+					},
+				},
+				{
+					name: "Folder index location",
+					desc: "Where to save Granola folder index notes in your vault.",
+					control: {
+						type: "text",
+						key: "folderIndexFolder",
+						placeholder: DEFAULT_SETTINGS.folderIndexFolder,
+						defaultValue: DEFAULT_SETTINGS.folderIndexFolder,
+					},
+				},
+				{
+					name: "Update folder index notes now",
+					desc: "Generate or update all folder index notes in your vault from cached meetings.",
+					render: (setting) => {
+						setting.addButton((button) =>
+							button
+								.setButtonText("Update folder indices")
+								.onClick(async () => {
+									button.setDisabled(true);
+									button.setButtonText("Updating...");
+									try {
+										await this.plugin.updateFolderIndexNotes(true);
+									} finally {
+										button.setDisabled(false);
+										button.setButtonText("Update folder indices");
 									}
 								}),
 						);
