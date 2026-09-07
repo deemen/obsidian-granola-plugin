@@ -11,6 +11,8 @@ export interface ParsedMeeting {
 	date: string; // raw from API, e.g. "Mar 3, 2026 3:00 PM"
 	participants: ParsedParticipant[];
 	folder?: string;
+	startTime?: string;
+	created?: string;
 }
 
 export interface ParsedMeetingDetails extends ParsedMeeting {
@@ -337,10 +339,29 @@ export function formatTranscriptText(raw: string): string {
 }
 
 /**
- * Parse a Granola date string like "Mar 3, 2026 3:00 PM" into components.
+ * Parse a Granola date string like "Mar 3, 2026 3:00 PM" or "2026-09-06" into components.
  */
 export function parseGranolaDate(dateStr: string): { isoDate: string; time: string; isoDateTime: string } {
-	const d = new Date(dateStr);
+	if (!dateStr || !dateStr.trim()) {
+		return { isoDate: "", time: "", isoDateTime: "" };
+	}
+
+	const trimmed = dateStr.trim();
+
+	// If dateStr is already a bare ISO date "YYYY-MM-DD", preserve it directly to prevent
+	// new Date("YYYY-MM-DD") UTC-midnight timezone shifting (which rolls back 1 day in timezones west of UTC).
+	const isoDateOnlyMatch = trimmed.match(/^(\d{4}-\d{2}-\d{2})$/);
+	if (isoDateOnlyMatch) {
+		const isoDate = isoDateOnlyMatch[1];
+		const d = new Date(`${isoDate}T00:00:00.000Z`);
+		return {
+			isoDate,
+			time: "",
+			isoDateTime: !isNaN(d.getTime()) ? d.toISOString() : "",
+		};
+	}
+
+	const d = new Date(trimmed);
 	if (isNaN(d.getTime())) {
 		return { isoDate: "", time: "", isoDateTime: "" };
 	}
@@ -351,7 +372,7 @@ export function parseGranolaDate(dateStr: string): { isoDate: string; time: stri
 	const isoDate = `${year}-${month}-${day}`;
 
 	// Extract time from original string
-	const timeMatch = dateStr.match(/\d{1,2}:\d{2}\s*[AP]M/i);
+	const timeMatch = trimmed.match(/\d{1,2}:\d{2}\s*[AP]M/i);
 	const time = timeMatch ? timeMatch[0] : "";
 
 	return { isoDate, time, isoDateTime: d.toISOString() };
@@ -370,8 +391,8 @@ export function buildMeetingData(
 		id: details.id,
 		title: details.title || "Untitled Meeting",
 		date: isoDate,
-		startTime: time,
-		created: isoDateTime,
+		startTime: details.startTime || time,
+		created: details.created || isoDateTime,
 		url: `https://notes.granola.ai/d/${details.id}`,
 		privateNotes: details.privateNotes,
 		enhancedNotes: details.summary,

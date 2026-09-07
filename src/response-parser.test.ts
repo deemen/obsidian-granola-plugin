@@ -415,6 +415,11 @@ describe("parseGranolaDate", () => {
 		expect(result.isoDateTime).not.toBe("");
 	});
 
+	it("preserves ISO date strings like YYYY-MM-DD without timezone shifting", () => {
+		const result = parseGranolaDate("2026-09-06");
+		expect(result.isoDate).toBe("2026-09-06");
+	});
+
 	it("returns blanks for an unparseable date", () => {
 		expect(parseGranolaDate("not a date")).toEqual({ isoDate: "", time: "", isoDateTime: "" });
 	});
@@ -440,6 +445,25 @@ describe("buildMeetingData", () => {
 		expect(data.url).toBe("https://notes.granola.ai/d/xyz");
 		expect(data.enhancedNotes).toBe("summary md");
 		expect(data.transcript).toBe("**Me:** hi");
+	});
+
+	it("preserves ISO date and existing startTime and created when rebuilding from cached details", () => {
+		const data = buildMeetingData(
+			{
+				id: "xyz",
+				title: "Family Meeting",
+				date: "2026-09-06",
+				startTime: "11:16 AM",
+				created: "2026-09-06T15:16:00.000Z",
+				participants: [],
+				privateNotes: "",
+				summary: "recap",
+			},
+			"",
+		);
+		expect(data.date).toBe("2026-09-06");
+		expect(data.startTime).toBe("11:16 AM");
+		expect(data.created).toBe("2026-09-06T15:16:00.000Z");
 	});
 
 	it("falls back to a default title when none is given", () => {

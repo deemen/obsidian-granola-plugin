@@ -1227,6 +1227,8 @@ export default class GranolaSyncPlugin extends Plugin {
 					id: cached.id,
 					title: cached.title,
 					date: cached.date,
+					startTime: cached.startTime,
+					created: cached.created,
 					participants: cached.participants,
 					folder: cached.folder,
 					privateNotes: cached.privateNotes,

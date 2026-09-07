@@ -371,4 +371,42 @@ describe("applyTemplate with extraVariables and bidirectional links", () => {
 		expect(result).toContain("transcript_link: [[2026-03-03 Weekly Sync (Transcript)]]");
 		expect(result).toContain("folder: General");
 	});
+
+	it("routes and renders meeting and transcript notes with correct date for September 6 meeting", () => {
+		const m = meeting({
+			title: "Family Meeting",
+			date: "2026-09-06",
+			startTime: "11:16 AM",
+		});
+
+		const notePath = resolveNotePath("Meetings", "{date} {title}", m);
+		expect(notePath.filename).toBe("2026-09-06 Family Meeting");
+		expect(notePath.path).toBe("Meetings/2026-09-06 Family Meeting.md");
+
+		const transcriptPath = resolveTranscriptPath(
+			"{meeting_folder}/Transcripts",
+			"{filename} (Transcript)",
+			m,
+			notePath.folder,
+			notePath.filename,
+		);
+		expect(transcriptPath.filename).toBe("2026-09-06 Family Meeting (Transcript)");
+		expect(transcriptPath.path).toBe("Meetings/Transcripts/2026-09-06 Family Meeting (Transcript).md");
+
+		const tpl = [
+			"title: \"{{granola_title}}\"",
+			"date: {{granola_date}}",
+			"start_time: {{granola_start_time}}",
+			"transcript: \"[[{{granola_meeting_transcript}}]]\"",
+		].join("\n");
+
+		const rendered = applyTemplate(tpl, m, new Map(), {
+			granola_meeting_transcript: transcriptPath.filename,
+		});
+
+		expect(rendered).toContain('title: "Family Meeting"');
+		expect(rendered).toContain("date: 2026-09-06");
+		expect(rendered).toContain("start_time: 11:16 AM");
+		expect(rendered).toContain('transcript: "[[2026-09-06 Family Meeting (Transcript)]]"');
+	});
 });
